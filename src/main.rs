@@ -740,9 +740,10 @@ if __name__ == "__main__":
             bottom: 1.,
             left: 0.,
         }))
+        .content(Content::Flex)
         .horizontal()
         .cross_align(Alignment::Center)
-        .spacing(8.)
+        .main_align(Alignment::SpaceBetween)
         .child(
             label()
                 .text("Coding Assistant")
@@ -750,38 +751,44 @@ if __name__ == "__main__":
                 .font_size(16.)
                 .font_weight(FontWeight::BOLD),
         )
-        .child(rect().width(Size::flex(1.)))
+        // Buttons were hidden with the following method: .child(rect().width(Size::flex(1.)))
         .child(
-            Button::new()
-                .background(c.surface_tertiary)
-                .hover_background(c.tertiary)
-                .border_fill(Color::TRANSPARENT)
-                .color(c.text_secondary)
-                .on_press({
-                    let mut show_settings = show_settings;
-                    move |_| {
-                        *show_settings.write() = true;
-                    }
-                })
-                .child("Settings"),
-        )
-        .child(
-            Button::new()
-                .background(c.surface_tertiary)
-                .hover_background(c.tertiary)
-                .border_fill(Color::TRANSPARENT)
-                .color(c.text_secondary)
-                .on_press(clear_chat)
-                .child("Clear Chat"),
-        )
-        .child(
-            Button::new()
-                .background(c.surface_tertiary)
-                .hover_background(c.tertiary)
-                .border_fill(Color::TRANSPARENT)
-                .color(c.text_secondary)
-                .on_press(reset_terminal)
-                .child("Reset Terminal"),
+            rect()
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(8.)
+                .child(
+                    Button::new()
+                        .background(c.surface_tertiary)
+                        .hover_background(c.tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_secondary)
+                        .on_press({
+                            let mut show_settings = show_settings;
+                            move |_| {
+                                *show_settings.write() = true;
+                            }
+                        })
+                        .child("Settings"),
+                )
+                .child(
+                    Button::new()
+                        .background(c.surface_tertiary)
+                        .hover_background(c.tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_secondary)
+                        .on_press(clear_chat)
+                        .child("Clear Chat"),
+                )
+                .child(
+                    Button::new()
+                        .background(c.surface_tertiary)
+                        .hover_background(c.tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_secondary)
+                        .on_press(reset_terminal)
+                        .child("Reset Terminal"),
+                ),
         );
 
     // Execute button for code
@@ -869,8 +876,9 @@ if __name__ == "__main__":
                         ),
                 )
                 .child(overlay)
-                .child(if *show_settings.read() {
+               .child(if *show_settings.read() {
                     settings_panel(
+                        c.clone(),
                         settings_key_input.into(),
                         settings_feedback.into(),
                         save_api_key,
@@ -889,6 +897,7 @@ if __name__ == "__main__":
 
 /// A modal settings panel for configuring the Albert API key.
 fn settings_panel<H1, H2>(
+    c: ColorsSheet,
     key_input: Writable<String>,
     feedback: Writable<String>,
     on_save: H1,
@@ -898,14 +907,15 @@ where
     H1: Into<EventHandler<Event<PressEventData>>>,
     H2: Into<EventHandler<Event<PressEventData>>>,
 {
-    let c = use_theme().read().colors.clone();
     rect()
         .layer(Layer::Overlay)
         .position(Position::new_absolute().top(0.).left(0.))
         .width(Size::fill())
         .height(Size::fill())
         .background(c.overlay)
-        .center()
+        .content(Content::Flex)
+        .cross_align(Alignment::Center)
+        .main_align(Alignment::Center)
         .child(
             rect()
                 .width(Size::px(480.))
@@ -913,8 +923,8 @@ where
                 .background(c.surface_primary)
                 .corner_radius(12.)
                 .shadow(Shadow::new().x(0.).y(4.).blur(20.).color(c.shadow))
-                .content(Content::Flex)
                 .spacing(12.)
+
                 .child(
                     label()
                         .text("Settings")
