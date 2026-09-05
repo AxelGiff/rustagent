@@ -112,63 +112,68 @@ impl SupportedLanguage {
     /// placeholder is replaced with the path to the temp file.
     fn run_command(&self, file: &std::path::Path) -> String {
         let file = file.display().to_string();
+        let newline = if cfg!(windows) { "\r\n" } else { "\n" };
         // Use the platform temp directory for compiled binaries so the
         // command works on Windows, macOS, and Linux alike.
         let temp_dir = std::env::temp_dir();
         let bin = |name: &str| temp_dir.join(name).display().to_string();
         match self {
             SupportedLanguage::Python => {
-                format!("{} {}\n", platform::python_command(), file)
+                format!("{} {}{}", platform::python_command(), file, newline)
             }
             SupportedLanguage::Rust => {
                 let out = bin("main_rs");
                 format!(
-                    "{} {} -o {} && {}\n",
+                    "{} {} -o {} && {}{}",
                     platform::rust_compiler(),
                     file,
                     out,
-                    out
+                    out,
+                    newline
                 )
             }
             SupportedLanguage::JavaScript => {
-                format!("{} {}\n", platform::node_runner(), file)
+                format!("{} {}{}", platform::node_runner(), file, newline)
             }
             SupportedLanguage::TypeScript => {
-                format!("{} {}\n", platform::ts_runner(), file)
+                format!("{} {}{}", platform::ts_runner(), file, newline)
             }
             SupportedLanguage::Html => platform::open_command(&file),
-            SupportedLanguage::Css => "echo 'CSS is a stylesheet, nothing to run.'\n".to_string(),
+            SupportedLanguage::Css => format!("echo 'CSS is a stylesheet, nothing to run.'{}", newline),
             SupportedLanguage::C => {
                 let out = bin("main_c");
                 format!(
-                    "{} {} -o {} && {}\n",
+                    "{} {} -o {} && {}{}",
                     platform::c_compiler(),
                     file,
                     out,
-                    out
+                    out,
+                    newline
                 )
             }
             SupportedLanguage::Cpp => {
                 let out = bin("main_cpp");
                 format!(
-                    "{} {} -o {} && {}\n",
+                    "{} {} -o {} && {}{}",
                     platform::cpp_compiler(),
                     file,
                     out,
-                    out
+                    out,
+                    newline
                 )
             }
             SupportedLanguage::Java => {
                 // Java requires the file name to match the public class name.
                 format!(
-                    "{} {} && {} Main\n",
+                    "{} {} && {} Main{}",
                     platform::java_compiler(),
                     file,
-                    platform::java_runtime()
+                    platform::java_runtime(),
+                    newline
                 )
             }
             SupportedLanguage::Go => {
-                format!("{} run {}\n", platform::go_runner(), file)
+                format!("{} run {}{}", platform::go_runner(), file, newline)
             }
         }
     }
@@ -380,8 +385,13 @@ if __name__ == "__main__":
     let reset_terminal = {
         let mut terminal_handle = terminal_handle;
         move |_| {
-            // Kill the current terminal (if any) and spawn a fresh one
-            *terminal_handle.write() = spawn_terminal();
+            // Unmount the current terminal widget first so Freya remounts a fresh one
+            *terminal_handle.write() = None;
+            let mut terminal_handle = terminal_handle.clone();
+            spawn(async move {
+                tokio::task::yield_now().await;
+                *terminal_handle.write() = spawn_terminal();
+            });
         }
     };
 
@@ -728,6 +738,33 @@ if __name__ == "__main__":
         .child(chat_area)
         .child(input_area);
 
+    // Execute button for code (styled with a green play triangle icon)
+    let execute_button = Button::new()
+        .background(c.surface_tertiary)
+        .hover_background(c.tertiary)
+        .border_fill(Color::TRANSPARENT)
+        .color(c.text_secondary)
+        .on_press(execute_code)
+        .child(
+            rect()
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(6.)
+                .child(
+                    label()
+                        .text("▷")
+                        .font_size(14.)
+                        .font_weight(FontWeight::BOLD)
+                        .color(Color::from_rgb(34, 197, 94)),
+                )
+                .child(
+                    label()
+                        .text("Execute Code")
+                        .font_size(13.)
+                        .color(c.text_secondary),
+                ),
+        );
+
     // Toolbar
     let toolbar = rect()
         .width(Size::fill())
@@ -751,7 +788,6 @@ if __name__ == "__main__":
                 .font_size(16.)
                 .font_weight(FontWeight::BOLD),
         )
-        // Buttons were hidden with the following method: .child(rect().width(Size::flex(1.)))
         .child(
             rect()
                 .horizontal()
@@ -788,38 +824,8 @@ if __name__ == "__main__":
                         .color(c.text_secondary)
                         .on_press(reset_terminal)
                         .child("Reset Terminal"),
-                ),
-        );
-
-    // Execute button for code
-    let execute_button = Button::new()
-        .background(c.surface_tertiary)
-        .hover_background(c.tertiary)
-        .border_fill(Color::TRANSPARENT)
-        .color(c.text_secondary)
-        .on_press(execute_code)
-        .child("Execute Code");
-
-    // A web image stretched across both panels as a decorative overlay. It is
-    // wrapped in a non-interactive rect so it never blocks pointer events from
-    // reaching the chat or terminal underneath, and it is placed on the overlay
-    // layer so it always renders on top of the panels.
-    let overlay = rect()
-        .layer(Layer::Overlay)
-        .position(Position::new_absolute().top(0.).left(0.))
-        .width(Size::fill())
-        .height(Size::fill())
-        .interactive(Interactive::No)
-        .child(
-            ImageViewer::new(
-                "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&h=700&fit=crop",
-            )
-            .decode_mode(DecodeMode::Custom(Size2D::new(1200., 700.)))
-            .aspect_ratio(AspectRatio::None)
-            .image_cover(ImageCover::Fill)
-            .width(Size::fill())
-            .height(Size::fill())
-            .opacity(0.35),
+                )
+                .child(execute_button),
         );
 
     rect()
@@ -839,19 +845,7 @@ if __name__ == "__main__":
                             ),
                         )
                         .panel(
-                            ResizablePanel::new(PanelSize::percent(30.)).child(
-                                rect()
-                                    .expanded()
-                                    .content(Content::Flex)
-                                    .child(chat_panel)
-                                    .child(
-                                        rect()
-                                            .width(Size::fill())
-                                            .height(Size::px(40.))
-                                            .padding(8.)
-                                            .child(execute_button),
-                                    ),
-                            ),
+                            ResizablePanel::new(PanelSize::percent(30.)).child(chat_panel),
                         )
                         .panel(
                             ResizablePanel::new(PanelSize::percent(50.)).child(
@@ -875,7 +869,6 @@ if __name__ == "__main__":
                             ),
                         ),
                 )
-                .child(overlay)
                .child(if *show_settings.read() {
                     settings_panel(
                         c.clone(),
@@ -1120,30 +1113,50 @@ fn terminal_panel(
         let mut handle_for_future = handle_for_future.clone();
         let mut current_dir_for_future = current_dir_for_future.clone();
         async move {
-            let terminal_handle = handle_for_future.read().clone();
-            let Some(terminal_handle) = terminal_handle else {
-                return;
-            };
             loop {
-                futures_util::select! {
-                    _ = terminal_handle.closed().fuse() => {
-                        let _ = handle_for_future.write().take();
+                let current_handle = handle_for_future.read().clone();
+                let Some(terminal_handle) = current_handle else {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                };
+
+                let mut closed = terminal_handle.closed().fuse();
+                let mut clipboard = terminal_handle.clipboard_changed().fuse();
+                let mut output = terminal_handle.output_received().fuse();
+
+                loop {
+                    let active_handle = handle_for_future.read().clone();
+                    let is_same = match (&active_handle, &terminal_handle) {
+                        (Some(h1), h2) => h1.id() == h2.id(),
+                        _ => false,
+                    };
+                    if !is_same {
                         break;
                     }
-                    _ = terminal_handle.clipboard_changed().fuse() => {
-                        if let Some(text) = terminal_handle.clipboard_content() {
-                            let _ = Clipboard::set(text);
+
+                    futures_util::select! {
+                        _ = &mut closed => {
+                            let active_handle = handle_for_future.read().clone();
+                            let is_same = match (&active_handle, &terminal_handle) {
+                                (Some(h1), h2) => h1.id() == h2.id(),
+                                _ => false,
+                            };
+                            if is_same {
+                                *handle_for_future.write() = spawn_terminal();
+                            }
+                            break;
                         }
-                    }
-                    _ = terminal_handle.output_received().fuse() => {
-                        // The shell reports its working directory via OSC 7 on
-                        // every prompt. Whenever new output arrives, check the
-                        // reported directory and update the sidebar if it
-                        // changed (e.g. after the user runs `cd`).
-                        if let Some(cwd) = terminal_handle.cwd()
-                            && *current_dir_for_future.read() != cwd
-                        {
-                            *current_dir_for_future.write() = cwd;
+                        _ = &mut clipboard => {
+                            if let Some(text) = terminal_handle.clipboard_content() {
+                                let _ = Clipboard::set(text);
+                            }
+                        }
+                        _ = &mut output => {
+                            if let Some(cwd) = terminal_handle.cwd()
+                                && *current_dir_for_future.read() != cwd
+                            {
+                                *current_dir_for_future.write() = cwd;
+                            }
                         }
                     }
                 }
