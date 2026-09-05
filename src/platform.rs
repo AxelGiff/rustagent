@@ -27,11 +27,11 @@ pub fn terminal_shell() -> &'static str {
 /// - Unix: bash is started with an init file that sets up OSC 7 emission.
 pub fn terminal_shell_args() -> Vec<String> {
     if cfg!(windows) {
-        // PowerShell: redefine `prompt` to emit OSC 7 with the current path.
+        // PowerShell: redefine `prompt` to emit OSC 7 with the current path and clear host.
         vec![
             "-NoExit".to_string(),
             "-Command".to_string(),
-            "function prompt { $p = $PWD.Path.Replace(' ','%20'); \"`e]7;file://$env:COMPUTERNAME$p`aPS $p> \" }".to_string(),
+            "function prompt { $p = $PWD.Path.Replace(' ','%20'); \"`e]7;file://$env:COMPUTERNAME$p`aPS $p> \" }; Clear-Host".to_string(),
         ]
     } else {
         // bash: use an init file that configures OSC 7 emission.
@@ -108,7 +108,7 @@ pub fn python_command() -> &'static str {
 /// - Linux: `xdg-open "file"`.
 pub fn open_command(file: &str) -> String {
     if cfg!(windows) {
-        format!("start \"\" \"{}\"\n", file)
+        format!("start \"\" \"{}\"\r\n", file)
     } else if cfg!(target_os = "macos") {
         format!("open \"{}\"\n", file)
     } else {
