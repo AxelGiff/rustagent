@@ -11,8 +11,13 @@ mod platform;
 mod theme;
 
 use freya::{clipboard::Clipboard, code_editor::*, prelude::*, terminal::*, text_edit::TextEditor};
-use futures_util::FutureExt;
-use rig::{client::CompletionClient, completion::Prompt, providers::openai};
+use futures_util::{FutureExt, StreamExt};
+use rig::{
+    agent::MultiTurnStreamItem,
+    client::CompletionClient,
+    providers::openai,
+    streaming::{StreamedAssistantContent, StreamingPrompt},
+};
 use ropey::Rope;
 use tokio::runtime::Builder;
 
@@ -492,7 +497,7 @@ if __name__ == "__main__":
                 return;
             }
 
-            // Add AI response using rig-core with the Albert endpoint
+            // Add AI response using streaming via rig-core with the Albert endpoint
             spawn(async move {
                 // Load the Albert API key from env var or config file.
                 let api_key_config = config::ApiKeyConfig::load();
@@ -519,23 +524,49 @@ if __name__ == "__main__":
                 match client {
                     Ok(client) => {
                         let agent = client.agent(ALBERT_MODEL).build();
-                        // Run the prompt with a timeout and retry/backoff for
-                        // transient failures (network, rate limit, timeout).
-                        let result =
-                            api::prompt_with_retry(|| {
+
+                        // Pre-push an empty AI message that will receive tokens incrementally as they stream in
+                        let ai_msg_index = {
+                            let mut msgs = messages.write();
+                            msgs.push(Message {
+                                role: Role::AI,
+                                content: String::new(),
+                            });
+                            msgs.len() - 1
+                        };
+
+                        let mut messages_stream = messages.clone();
+                        let result = api::prompt_stream_with_retry(
+                            || {
                                 let agent = agent.clone();
                                 let user_message = user_message.clone();
                                 async move {
-                                    agent.prompt(&user_message).await.map_err(|e| e.to_string())
+                                    let stream = agent.stream_prompt(&user_message).await;
+                                    let mapped = stream.map(|item| match item {
+                                        Ok(MultiTurnStreamItem::StreamAssistantItem(
+                                            StreamedAssistantContent::Text(text),
+                                        )) => Ok(text.to_string()),
+                                        Ok(_) => Ok(String::new()),
+                                        Err(e) => Err(e.to_string()),
+                                    });
+                                    Ok(Box::pin(mapped))
                                 }
-                            })
-                            .await;
+                            },
+                            |chunk| {
+                                let mut msgs = messages_stream.write();
+                                if let Some(msg) = msgs.get_mut(ai_msg_index) {
+                                    msg.content.push_str(chunk);
+                                }
+                            },
+                            || false,
+                        )
+                        .await;
 
                         match result {
                             Ok(response) => {
-                                // Decide what to do with the response: inject code
-                                // into the editor, or show the raw response.
-                                let final_response = match flow::decide_editor_action(
+                                // Decide what to do with the complete response once streaming finishes:
+                                // inject code into the editor, or keep the raw streaming text in chat.
+                                match flow::decide_editor_action(
                                     &response,
                                     wants_code,
                                     detected_language,
@@ -549,28 +580,27 @@ if __name__ == "__main__":
                                         editor.write().set_selection((0, 0));
                                         editor.write().parse();
                                         editor.write().measure(14., "Jetbrains Mono");
-                                        // Update the editor header title to reflect the
-                                        // script that was just written.
+                                        // Update the editor header title to reflect the script that was written.
                                         *file_name.write() =
                                             flow::derive_file_name(&code, language);
-                                        // Only show a confirmation in the chat, NOT the code.
-                                        // The code goes exclusively to the editor.
-                                        flow::insertion_confirmation(language)
+                                        // Update the AI chat message content to the insertion confirmation.
+                                        let mut msgs = messages.write();
+                                        if let Some(msg) = msgs.get_mut(ai_msg_index) {
+                                            msg.content = flow::insertion_confirmation(language);
+                                        }
                                     }
-                                    flow::EditorAction::ShowResponse => response,
-                                };
-
-                                messages.write().push(Message {
-                                    role: Role::AI,
-                                    content: final_response,
-                                });
+                                    flow::EditorAction::ShowResponse => {
+                                        // The stream has already populated the complete response.
+                                    }
+                                }
                             }
-                            Err((category, message)) => {
-                                messages.write().push(Message {
-                                    role: Role::AI,
-                                    content: format!("⚠️ {}", message),
-                                });
-                                let _ = category;
+                            Err((_category, full_err_or_partial)) => {
+                                let mut msgs = messages.write();
+                                if let Some(msg) = msgs.get_mut(ai_msg_index) {
+                                    if msg.content.is_empty() {
+                                        msg.content = format!("⚠️ {}", full_err_or_partial);
+                                    }
+                                }
                             }
                         }
                     }
@@ -752,7 +782,7 @@ if __name__ == "__main__":
                 .spacing(6.)
                 .child(
                     label()
-                        .text("▷")
+                        .text("▶")
                         .font_size(14.)
                         .font_weight(FontWeight::BOLD)
                         .color(Color::from_rgb(34, 197, 94)),

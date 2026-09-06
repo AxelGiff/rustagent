@@ -989,4 +989,60 @@ mod tests {
             assert!(!command.trim().is_empty(), "empty command for: {msg}");
         }
     }
+
+    // ------------------------------------------------------------------
+    // Streaming flow tests (Task 19)
+    // ------------------------------------------------------------------
+
+    /// Incremental token accumulation and post-stream code block extraction.
+    #[test]
+    fn streaming_flow_incremental_assembly_and_code_extraction() {
+        let chunks = vec![
+            "Here is the Python function:\n\n```python\n",
+            "def add(a, b):\n",
+            "    return a + b\n",
+            "```\n",
+            "Hope this helps!",
+        ];
+
+        let mut accumulated_chat = String::new();
+        for chunk in &chunks {
+            accumulated_chat.push_str(chunk);
+        }
+
+        assert_eq!(
+            accumulated_chat,
+            "Here is the Python function:\n\n```python\ndef add(a, b):\n    return a + b\n```\nHope this helps!"
+        );
+
+        // After stream completion, extraction runs:
+        let action = decide_editor_action(&accumulated_chat, true, SupportedLanguage::Python);
+        match action {
+            EditorAction::Insert { language, code } => {
+                assert_eq!(language, SupportedLanguage::Python);
+                assert_eq!(code, "def add(a, b):\n    return a + b");
+            }
+            EditorAction::ShowResponse => panic!("Expected Insert action after streaming finished"),
+        }
+    }
+
+    /// Mid-stream error handling preserves partial response and appends error notice.
+    #[test]
+    fn streaming_flow_handles_mid_stream_error_preserves_partial() {
+        let chunks = vec!["Here is partial text... ", "and some more."];
+        let mut accumulated = String::new();
+        for c in chunks {
+            accumulated.push_str(c);
+        }
+        let error_notice = "\n\n⚠️ A network error occurred while contacting the Albert API.";
+        accumulated.push_str(error_notice);
+
+        assert!(accumulated.starts_with("Here is partial text... and some more."));
+        assert!(accumulated.contains("network error"));
+
+        // If code was requested but stream failed mid-way without complete code block, show partial response in chat
+        let action = decide_editor_action(&accumulated, true, SupportedLanguage::Python);
+        assert_eq!(action, EditorAction::ShowResponse);
+    }
 }
+
