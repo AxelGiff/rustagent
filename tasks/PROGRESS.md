@@ -411,19 +411,19 @@ pass.
 
 ## Task 19 — Add streaming responses to the AI chat
 
-**Status:** 🔴 Not started
-**Current step:** Step 1 of 6
+**Status:**  Completed
+**Current step:** Step 6 of 6
 
 | Step | Description | Status |
 |------|-------------|--------|
-| 1 | Investigate the current response handling | ⬜ |
-| 2 | Add a streaming API call | ⬜ |
-| 3 | Wire streaming into the chat panel | ⬜ |
-| 4 | Keep code extraction working with streaming | ⬜ |
-| 5 | Handle stream errors and cancellation | ⬜ |
-| 6 | Verify the full suite still passes | ⬜ |
+| 1 | Investigate the current response handling | ✅ |
+| 2 | Add a streaming API call | ✅ |
+| 3 | Wire streaming into the chat panel | ✅ |
+| 4 | Keep code extraction working with streaming | ✅ |
+| 5 | Handle stream errors and cancellation | ✅ |
+| 6 | Verify the full suite still passes | ✅ |
 
-**Last updated:** 2026-08-19
+**Last updated:** 2026-09-06
 **Notes:** See [tasks/19-streaming-responses.md](tasks/19-streaming-responses.md)
 
 ---
