@@ -19,6 +19,58 @@ const MAX_BACKOFF: Duration = Duration::from_secs(4);
 /// The default timeout for a single completion request.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Maximum number of historical messages sent in API requests to bound token usage.
+pub const MAX_HISTORY_MESSAGES: usize = 20;
+
+/// Role of a message sender in the natural language chat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    AI,
+    User,
+}
+
+/// A chat message entry containing sender role and string content.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
+}
+
+/// Build a list of `rig::completion::Message` context history items from UI messages,
+/// skipping initial system warnings/welcome messages and capping to `max_history` entries.
+pub fn build_chat_history(messages: &[Message], max_history: usize) -> Vec<rig::completion::Message> {
+    let mut history = Vec::new();
+
+    for msg in messages {
+        // Skip system/welcome messages that are not real conversation turns
+        if msg.role == Role::AI
+            && (msg.content.starts_with("Hello! I'm your coding assistant")
+                || msg.content.starts_with("⚠️ "))
+        {
+            continue;
+        }
+
+        match msg.role {
+            Role::User => {
+                if !msg.content.trim().is_empty() {
+                    history.push(rig::completion::Message::user(msg.content.clone()));
+                }
+            }
+            Role::AI => {
+                if !msg.content.trim().is_empty() {
+                    history.push(rig::completion::Message::assistant(msg.content.clone()));
+                }
+            }
+        }
+    }
+
+    if history.len() > max_history {
+        history.drain(0..history.len() - max_history);
+    }
+
+    history
+}
+
 /// Categories of API failures, used to pick an appropriate user-facing message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ApiErrorCategory {
@@ -452,6 +504,41 @@ mod tests {
 
         assert_eq!(result, Ok("Chunk 1".to_string()));
         assert_eq!(chunks_received, vec!["Chunk 1"]);
+    }
+
+    #[test]
+    fn build_chat_history_filters_system_welcome_and_orders_messages() {
+        let msgs = vec![
+            Message {
+                role: Role::AI,
+                content: "Hello! I'm your coding assistant...".to_string(),
+            },
+            Message {
+                role: Role::User,
+                content: "write python code".to_string(),
+            },
+            Message {
+                role: Role::AI,
+                content: "def foo(): pass".to_string(),
+            },
+        ];
+
+        let history = build_chat_history(&msgs, 20);
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn build_chat_history_caps_length_to_max() {
+        let mut msgs = Vec::new();
+        for i in 0..30 {
+            msgs.push(Message {
+                role: if i % 2 == 0 { Role::User } else { Role::AI },
+                content: format!("Message {}", i),
+            });
+        }
+
+        let history = build_chat_history(&msgs, 10);
+        assert_eq!(history.len(), 10);
     }
 }
 
