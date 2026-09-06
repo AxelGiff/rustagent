@@ -522,6 +522,96 @@ pass.
 
 ---
 
+## Task 25 — Rendu Markdown riche et blocs de code dans le Chat
+
+**Status:** � Completed
+**Current step:** Step 5 of 5
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Intégrer le composant Markdown dans le Chat | ✅ |
+| 2 | Coloration syntaxique des blocs de code | ✅ |
+| 3 | Bouton de copie du code | ✅ |
+| 4 | Support du streaming avec le Markdown | ✅ |
+| 5 | Vérifier que toute la suite de tests passe | ✅ |
+
+**Last updated:** 2026-09-06
+**Notes:** See [tasks/25-markdown-chat-rendering.md](tasks/25-markdown-chat-rendering.md)
+
+---
+
+## Task 26 — Persistance et historique des sessions de conversation
+
+**Status:** 🔴 Not started
+**Current step:** Step 1 of 5
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Structure de données et stockage JSON | ⬜ |
+| 2 | Auto-sauvegarde des sessions | ⬜ |
+| 3 | Panneau latéral d'historique des conversations | ⬜ |
+| 4 | Supression et réinitialisation de session | ⬜ |
+| 5 | Vérifier que toute la suite de tests passe | ⬜ |
+
+**Last updated:** 2026-09-06
+**Notes:** See [tasks/26-persistent-chat-sessions.md](tasks/26-persistent-chat-sessions.md)
+
+---
+
+## Task 27 — Éditeur multi-onglets et fonctionnalités d'édition avancées
+
+**Status:** 🔴 Not started
+**Current step:** Step 1 of 5
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Barre d'onglets de l'éditeur | ⬜ |
+| 2 | État multi-fichiers et suivi des modifications | ⬜ |
+| 3 | Numérotation des lignes et marge gauche | ⬜ |
+| 4 | Raccourci de sauvegarde (Ctrl+S / Cmd+S) | ⬜ |
+| 5 | Vérifier que toute la suite de tests passe | ⬜ |
+
+**Last updated:** 2026-09-06
+**Notes:** See [tasks/27-multi-tab-editor.md](tasks/27-multi-tab-editor.md)
+
+---
+
+## Task 28 — Capacités Agentiques et inspection du Projet (Tool Use & RAG)
+
+**Status:** 🔴 Not started
+**Current step:** Step 1 of 5
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Définition des outils de lecture | ⬜ |
+| 2 | Demande d'autorisation dans l'IHM | ⬜ |
+| 3 | RAG / Indexation légère du projet | ⬜ |
+| 4 | Vérification des requêtes multi-fichiers | ⬜ |
+| 5 | Vérifier que toute la suite de tests passe | ⬜ |
+
+**Last updated:** 2026-09-06
+**Notes:** See [tasks/28-agentic-tools-codebase-rag.md](tasks/28-agentic-tools-codebase-rag.md)
+
+---
+
+## Task 29 — Contrôle du Streaming & Indicateurs de Performance
+
+**Status:** 🔴 Not started
+**Current step:** Step 1 of 5
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | Bouton "Arrêter la génération" (Stop Stream) | ⬜ |
+| 2 | Indicateur d'état avant streaming (Thinking/Spinner) | ⬜ |
+| 3 | Calcul et affichage du débit de génération | ⬜ |
+| 4 | Gestion propre de l'interruption | ⬜ |
+| 5 | Vérifier que toute la suite de tests passe | ⬜ |
+
+**Last updated:** 2026-09-06
+**Notes:** See [tasks/29-streaming-controls-metrics.md](tasks/29-streaming-controls-metrics.md)
+
+---
+
 ## Summary
 
 | # | Task | Status | Current step |
@@ -544,12 +634,17 @@ pass.
 | 16 | Add automated tests for the GUI layer | 🔴 | 0/6 |
 | 17 | Harden the file-tree against directory errors | 🔴 | 0/6 |
 | 18 | Make the AI model and endpoint configurable | 🔴 | 0/6 |
-| 19 | Add streaming responses to the AI chat | 🔴 | 0/6 |
-| 20 | Add multi-turn conversation context | 🔴 | 0/6 |
+| 19 | Add streaming responses to the AI chat | 🟢 | 6/6 ✅ |
+| 20 | Add multi-turn conversation context | 🟢 | 6/6 ✅ |
 | 21 | Add CLI metadata, version flag, and app branding | 🔴 | 0/6 |
 | 22 | Security and robustness hardening | 🔴 | 0/6 |
 | 23 | Documentation and developer experience | 🔴 | 0/5 |
 | 24 | Cross-platform runtime verification (Windows & macOS) | 🔴 | 0/6 |
+| 25 | Rendu Markdown riche et blocs de code dans le Chat | 🟢 | 5/5 ✅ |
+| 26 | Persistance et historique des sessions de conversation | 🔴 | 0/5 |
+| 27 | Éditeur multi-onglets et fonctionnalités d'édition | 🔴 | 0/5 |
+| 28 | Capacités Agentiques et inspection du Projet (RAG) | 🔴 | 0/5 |
+| 29 | Contrôle du Streaming & Indicateurs de Performance | 🔴 | 0/5 |
 
 ---
 

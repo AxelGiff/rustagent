@@ -339,6 +339,68 @@ pub fn looks_like_code(snippet: &str, language: SupportedLanguage) -> bool {
     }
 }
 
+/// A segment of a markdown chat message: either plain text or a structured code block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MarkdownSegment {
+    Text(String),
+    CodeBlock { language: String, code: String },
+}
+
+/// Parse a markdown string (including in-progress streaming text) into text segments
+/// and code blocks with optional language tags.
+pub fn parse_markdown_segments(content: &str) -> Vec<MarkdownSegment> {
+    let mut segments = Vec::new();
+    let mut current_text = String::new();
+    let lines = content.lines();
+
+    let mut in_code_block = false;
+    let mut current_lang = String::new();
+    let mut current_code = String::new();
+
+    for line in lines {
+        if line.trim_start().starts_with("```") {
+            if !in_code_block {
+                if !current_text.trim().is_empty() {
+                    segments.push(MarkdownSegment::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                in_code_block = true;
+                current_lang = line.trim_start().trim_start_matches('`').trim().to_string();
+                current_code.clear();
+            } else {
+                in_code_block = false;
+                segments.push(MarkdownSegment::CodeBlock {
+                    language: current_lang.clone(),
+                    code: current_code.trim_end_matches('\n').to_string(),
+                });
+                current_lang.clear();
+                current_code.clear();
+            }
+        } else if in_code_block {
+            current_code.push_str(line);
+            current_code.push('\n');
+        } else {
+            current_text.push_str(line);
+            current_text.push('\n');
+        }
+    }
+
+    if in_code_block {
+        segments.push(MarkdownSegment::CodeBlock {
+            language: current_lang,
+            code: current_code.trim_end_matches('\n').to_string(),
+        });
+    } else if !current_text.trim().is_empty() {
+        segments.push(MarkdownSegment::Text(current_text));
+    }
+
+    if segments.is_empty() {
+        segments.push(MarkdownSegment::Text(content.to_string()));
+    }
+
+    segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1091,6 +1153,54 @@ mod tests {
 
         let history_after = crate::api::build_chat_history(&messages, 20);
         assert_eq!(history_after.len(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Markdown chat rendering tests (Task 25)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_markdown_segments_plain_text() {
+        let content = "Hello world!\nHow are you?";
+        let segments = parse_markdown_segments(content);
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0], MarkdownSegment::Text(content.to_string()));
+    }
+
+    #[test]
+    fn parse_markdown_segments_with_code_block() {
+        let content = "Here is Python:\n```python\ndef foo():\n    pass\n```\nHope it helps!";
+        let segments = parse_markdown_segments(content);
+        assert_eq!(segments.len(), 3);
+        assert_eq!(
+            segments[0],
+            MarkdownSegment::Text("Here is Python:\n".to_string())
+        );
+        assert_eq!(
+            segments[1],
+            MarkdownSegment::CodeBlock {
+                language: "python".to_string(),
+                code: "def foo():\n    pass".to_string(),
+            }
+        );
+        assert_eq!(
+            segments[2],
+            MarkdownSegment::Text("Hope it helps!\n".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_markdown_segments_streaming_unclosed_code_block() {
+        let content = "Streaming response:\n```rust\nfn main() {";
+        let segments = parse_markdown_segments(content);
+        assert_eq!(segments.len(), 2);
+        assert_eq!(
+            segments[1],
+            MarkdownSegment::CodeBlock {
+                language: "rust".to_string(),
+                code: "fn main() {".to_string(),
+            }
+        );
     }
 }
 
