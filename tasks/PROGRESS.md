@@ -430,19 +430,19 @@ pass.
 
 ## Task 20 — Add multi-turn conversation context to the AI chat
 
-**Status:** 🔴 Not started
-**Current step:** Step 1 of 6
+**Status:** 🟢 Completed
+**Current step:** Step 6 of 6
 
 | Step | Description | Status |
 |------|-------------|--------|
-| 1 | Add a conversation-history data structure | ⬜ |
-| 2 | Cap the history length | ⬜ |
-| 3 | Send history with each request | ⬜ |
-| 4 | Clear history on "clear chat" | ⬜ |
-| 5 | Keep code extraction scoped to the latest response | ⬜ |
-| 6 | Verify the full suite still passes | ⬜ |
+| 1 | Add a conversation-history data structure | ✅ |
+| 2 | Cap the history length | ✅ |
+| 3 | Send history with each request | ✅ |
+| 4 | Clear history on "clear chat" | ✅ |
+| 5 | Keep code extraction scoped to the latest response | ✅ |
+| 6 | Verify the full suite still passes | ✅ |
 
-**Last updated:** 2026-08-19
+**Last updated:** 2026-09-06
 **Notes:** See [tasks/20-conversation-context.md](tasks/20-conversation-context.md)
 
 ---

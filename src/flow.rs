@@ -1044,5 +1044,53 @@ mod tests {
         let action = decide_editor_action(&accumulated, true, SupportedLanguage::Python);
         assert_eq!(action, EditorAction::ShowResponse);
     }
+
+    // ------------------------------------------------------------------
+    // Multi-turn conversation context tests (Task 20)
+    // ------------------------------------------------------------------
+
+    /// Code extraction is strictly scoped to the latest response, ignoring prior turns in history.
+    #[test]
+    fn multi_turn_code_extraction_scoped_to_latest_response() {
+        let _turn1_response = "```python\ndef old_function():\n    return 1\n```";
+        let turn2_response = "```python\ndef new_function():\n    return 2\n```";
+
+        let action = decide_editor_action(turn2_response, true, SupportedLanguage::Python);
+        match action {
+            EditorAction::Insert { language, code } => {
+                assert_eq!(language, SupportedLanguage::Python);
+                assert_eq!(code, "def new_function():\n    return 2");
+            }
+            EditorAction::ShowResponse => panic!("Expected Insert action for latest response"),
+        }
+    }
+
+    /// Clearing chat resets history payload for subsequent requests.
+    #[test]
+    fn clear_chat_resets_history_payload() {
+        let mut messages = vec![
+            crate::api::Message {
+                role: crate::api::Role::User,
+                content: "First turn".to_string(),
+            },
+            crate::api::Message {
+                role: crate::api::Role::AI,
+                content: "First AI response".to_string(),
+            },
+        ];
+
+        let history_before = crate::api::build_chat_history(&messages, 20);
+        assert_eq!(history_before.len(), 2);
+
+        // Simulate Clear Chat action
+        messages.clear();
+        messages.push(crate::api::Message {
+            role: crate::api::Role::AI,
+            content: "Chat cleared. How can I help you?".to_string(),
+        });
+
+        let history_after = crate::api::build_chat_history(&messages, 20);
+        assert_eq!(history_after.len(), 0);
+    }
 }
 

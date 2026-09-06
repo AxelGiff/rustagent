@@ -16,7 +16,7 @@ use rig::{
     agent::MultiTurnStreamItem,
     client::CompletionClient,
     providers::openai,
-    streaming::{StreamedAssistantContent, StreamingPrompt},
+    streaming::{StreamedAssistantContent, StreamingChat},
 };
 use ropey::Rope;
 use tokio::runtime::Builder;
@@ -25,17 +25,7 @@ use tokio::runtime::Builder;
 const ALBERT_ENDPOINT: &str = "https://albert.api.etalab.gouv.fr/v1";
 const ALBERT_MODEL: &str = "deepseek-v4-flash";
 
-#[derive(Clone, Debug, PartialEq)]
-enum Role {
-    AI,
-    User,
-}
-
-#[derive(Clone, Debug)]
-struct Message {
-    role: Role,
-    content: String,
-}
+use api::{Message, Role};
 
 /// A programming language supported by the editor. Each language knows its
 /// tree-sitter grammar, highlights query, file extension and how to run it.
@@ -525,6 +515,20 @@ if __name__ == "__main__":
                     Ok(client) => {
                         let agent = client.agent(ALBERT_MODEL).build();
 
+                        // Build conversation history from messages prior to this prompt
+                        let prior_messages = {
+                            let msgs = messages.read();
+                            if msgs.len() > 1 {
+                                msgs[..msgs.len() - 1].to_vec()
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        let chat_history = api::build_chat_history(
+                            &prior_messages,
+                            api::MAX_HISTORY_MESSAGES,
+                        );
+
                         // Pre-push an empty AI message that will receive tokens incrementally as they stream in
                         let ai_msg_index = {
                             let mut msgs = messages.write();
@@ -540,8 +544,9 @@ if __name__ == "__main__":
                             || {
                                 let agent = agent.clone();
                                 let user_message = user_message.clone();
+                                let chat_history = chat_history.clone();
                                 async move {
-                                    let stream = agent.stream_prompt(&user_message).await;
+                                    let stream = agent.stream_chat(user_message, chat_history).await;
                                     let mapped = stream.map(|item| match item {
                                         Ok(MultiTurnStreamItem::StreamAssistantItem(
                                             StreamedAssistantContent::Text(text),
