@@ -724,8 +724,95 @@ if __name__ == "__main__":
                                     .color(text_color)
                                     .into_element()
                             } else {
-                                MarkdownViewer::new(msg.content.clone())
-                                    .color(text_color)
+                                rect()
+                                    .width(Size::fill())
+                                    .children(
+                                        flow::parse_markdown_segments(&msg.content)
+                                            .into_iter()
+                                            .map(|seg| match seg {
+                                                flow::MarkdownSegment::Text(text) => {
+                                                    MarkdownViewer::new(text)
+                                                        .color(text_color)
+                                                        .into_element()
+                                                }
+                                                flow::MarkdownSegment::CodeBlock {
+                                                    language,
+                                                    code,
+                                                } => {
+                                                    rect()
+                                                        .width(Size::fill())
+                                                        .margin(4.)
+                                                        .corner_radius(8.)
+                                                        .background(c.surface_primary)
+                                                        .border(
+                                                            Border::new()
+                                                                .fill(c.border)
+                                                                .width(BorderWidth {
+                                                                    top: 1.,
+                                                                    right: 1.,
+                                                                    bottom: 1.,
+                                                                    left: 1.,
+                                                                }),
+                                                        )
+                                                        .child(
+                                                            rect()
+                                                                .width(Size::fill())
+                                                                .height(Size::px(32.))
+                                                                .padding(4.)
+                                                                .background(c.surface_secondary)
+                                                                .content(Content::Flex)
+                                                                .horizontal()
+                                                                .cross_align(Alignment::Center)
+                                                                .main_align(Alignment::SpaceBetween)
+                                                                .child(
+                                                                    label()
+                                                                        .text(if language.is_empty() {
+                                                                            "CODE".to_string()
+                                                                        } else {
+                                                                            language.to_uppercase()
+                                                                        })
+                                                                        .font_size(11.)
+                                                                        .font_weight(FontWeight::BOLD)
+                                                                        .color(c.text_secondary),
+                                                                )
+                                                                .child(
+                                                                    Button::new()
+                                                                        .background(c.surface_tertiary)
+                                                                        .hover_background(c.tertiary)
+                                                                        .border_fill(Color::TRANSPARENT)
+                                                                        .color(c.text_secondary)
+                                                                        .on_press({
+                                                                            let code_to_copy = code.clone();
+                                                                            move |_| {
+                                                                                let _ = Clipboard::set(code_to_copy.clone());
+                                                                            }
+                                                                        })
+                                                                        .child(
+                                                                            rect()
+                                                                                .horizontal()
+                                                                                .cross_align(Alignment::Center)
+                                                                                .spacing(4.)
+                                                                                .child(label().text("📋").font_size(11.))
+                                                                                .child(label().text("Copy Code").font_size(11.)),
+                                                                        ),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            rect()
+                                                                .width(Size::fill())
+                                                                .padding(8.)
+                                                                .child(
+                                                                    SelectableText::new()
+                                                                        .span(code)
+                                                                        .color(c.text_primary)
+                                                                        .font_family("Jetbrains Mono")
+                                                                        .into_element(),
+                                                                ),
+                                                        )
+                                                        .into_element()
+                                                }
+                                            }),
+                                    )
                                     .into_element()
                             }),
                     )
