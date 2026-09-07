@@ -379,9 +379,11 @@ if __name__ == "__main__":
 
     let reset_terminal = {
         let mut terminal_handle = terminal_handle;
+        let mut current_dir = current_dir;
         move |_| {
             // Unmount the current terminal widget first so Freya remounts a fresh one
             *terminal_handle.write() = None;
+            *current_dir.write() = std::env::current_dir().unwrap_or_default();
             let mut terminal_handle = terminal_handle.clone();
             spawn(async move {
                 tokio::task::yield_now().await;
@@ -1242,6 +1244,12 @@ fn terminal_panel(
                     continue;
                 };
 
+                if let Some(cwd) = terminal_handle.cwd() {
+                    if *current_dir_for_future.read() != cwd {
+                        *current_dir_for_future.write() = cwd;
+                    }
+                }
+
                 let mut closed = terminal_handle.closed().fuse();
                 let mut clipboard = terminal_handle.clipboard_changed().fuse();
                 let mut output = terminal_handle.output_received().fuse();
@@ -1256,7 +1264,17 @@ fn terminal_panel(
                         break;
                     }
 
+                    let timer = tokio::time::sleep(std::time::Duration::from_millis(300)).fuse();
+                    futures_util::pin_mut!(timer);
+
                     futures_util::select! {
+                        _ = &mut timer => {
+                            if let Some(cwd) = terminal_handle.cwd()
+                                && *current_dir_for_future.read() != cwd
+                            {
+                                *current_dir_for_future.write() = cwd;
+                            }
+                        }
                         _ = &mut closed => {
                             let active_handle = handle_for_future.read().clone();
                             let is_same = match (&active_handle, &terminal_handle) {
@@ -1272,6 +1290,7 @@ fn terminal_panel(
                             if let Some(text) = terminal_handle.clipboard_content() {
                                 let _ = Clipboard::set(text);
                             }
+                            clipboard = terminal_handle.clipboard_changed().fuse();
                         }
                         _ = &mut output => {
                             if let Some(cwd) = terminal_handle.cwd()
@@ -1279,6 +1298,7 @@ fn terminal_panel(
                             {
                                 *current_dir_for_future.write() = cwd;
                             }
+                            output = terminal_handle.output_received().fuse();
                         }
                     }
                 }

@@ -1082,7 +1082,7 @@ mod tests {
         match action {
             EditorAction::Insert { language, code } => {
                 assert_eq!(language, SupportedLanguage::Python);
-                assert_eq!(code, "def add(a, b):\n    return a + b");
+                assert_eq!(code, "def add(a, b):\n    return a + b\n");
             }
             EditorAction::ShowResponse => panic!("Expected Insert action after streaming finished"),
         }
@@ -1121,7 +1121,7 @@ mod tests {
         match action {
             EditorAction::Insert { language, code } => {
                 assert_eq!(language, SupportedLanguage::Python);
-                assert_eq!(code, "def new_function():\n    return 2");
+                assert_eq!(code, "def new_function():\n    return 2\n");
             }
             EditorAction::ShowResponse => panic!("Expected Insert action for latest response"),
         }
@@ -1164,7 +1164,7 @@ mod tests {
         let content = "Hello world!\nHow are you?";
         let segments = parse_markdown_segments(content);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0], MarkdownSegment::Text(content.to_string()));
+        assert_eq!(segments[0], MarkdownSegment::Text(format!("{}\n", content)));
     }
 
     #[test]

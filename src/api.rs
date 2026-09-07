@@ -45,6 +45,7 @@ pub fn build_chat_history(messages: &[Message], max_history: usize) -> Vec<rig::
         // Skip system/welcome messages that are not real conversation turns
         if msg.role == Role::AI
             && (msg.content.starts_with("Hello! I'm your coding assistant")
+                || msg.content.starts_with("Chat cleared")
                 || msg.content.starts_with("⚠️ "))
         {
             continue;

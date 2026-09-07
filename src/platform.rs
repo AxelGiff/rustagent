@@ -26,35 +26,64 @@ pub fn terminal_shell() -> &'static str {
 /// - Windows: PowerShell is told to emit OSC 7 from its `prompt` function.
 /// - Unix: bash is started with an init file that sets up OSC 7 emission.
 pub fn terminal_shell_args() -> Vec<String> {
-    if cfg!(windows) {
-        // PowerShell: redefine `prompt` to emit OSC 7 with the current path and clear host.
-        vec![
-            "-NoExit".to_string(),
-            "-Command".to_string(),
-            "function prompt { $p = $PWD.Path.Replace(' ','%20'); \"`e]7;file://$env:COMPUTERNAME$p`aPS $p> \" }; Clear-Host".to_string(),
-        ]
-    } else {
-        // bash: use an init file that configures OSC 7 emission.
-        vec![
-            "--init-file".to_string(),
-            osc7_init_file().display().to_string(),
-        ]
-    }
+    vec![
+        if cfg!(windows) {
+            "-NoExit".to_string()
+        } else {
+            "--init-file".to_string()
+        },
+        if cfg!(windows) {
+            "-ExecutionPolicy".to_string()
+        } else {
+            osc7_init_file().display().to_string()
+        },
+        if cfg!(windows) {
+            "Bypass".to_string()
+        } else {
+            "".to_string()
+        },
+        if cfg!(windows) {
+            "-File".to_string()
+        } else {
+            "".to_string()
+        },
+        if cfg!(windows) {
+            osc7_init_file().display().to_string()
+        } else {
+            "".to_string()
+        },
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect()
 }
 
-/// Path to a generated bash init file that makes the shell report its current
+/// Path to a generated shell init file that makes the shell report its current
 /// working directory via OSC 7 on every prompt.
 ///
 /// The file is written to the platform temp directory and is idempotent: it is
-/// regenerated on every call, so it always reflects the current logic. It
-/// sources the user's normal `~/.bashrc` first (when present) so their aliases
-/// and customizations are preserved, then installs a `PROMPT_COMMAND` that
-/// emits the OSC 7 sequence with the URL-encoded current directory.
+/// regenerated on every call, so it always reflects the current logic.
 fn osc7_init_file() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("rustagent");
     let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("osc7.bash");
-    let content = r#"# rustagent OSC 7 init file.
+
+    if cfg!(windows) {
+        let path = dir.join("osc7.ps1");
+        let content = r#"# rustagent OSC 7 init file for PowerShell.
+function prompt {
+    $p = $PWD.Path.Replace('\', '/').Replace(' ', '%20')
+    $esc = [char]27
+    $bel = [char]7
+    $host.UI.Write("$esc]7;file:///$p$bel")
+    "PS $PWD> "
+}
+Clear-Host
+"#;
+        let _ = std::fs::write(&path, content);
+        path
+    } else {
+        let path = dir.join("osc7.bash");
+        let content = r#"# rustagent OSC 7 init file.
 # Preserve the user's normal bash customizations.
 if [ -f "$HOME/.bashrc" ]; then
     . "$HOME/.bashrc"
@@ -75,8 +104,9 @@ __rustagent_osc7() {
 }
 PROMPT_COMMAND="__rustagent_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 "#;
-    let _ = std::fs::write(&path, content);
-    path
+        let _ = std::fs::write(&path, content);
+        path
+    }
 }
 
 /// Environment variables to set on the terminal shell.
