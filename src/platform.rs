@@ -1,13 +1,13 @@
-//! Cross-platform helpers for the integrated terminal and code execution.
+//! Utilitaires multi-plateformes pour le terminal intégré et l'exécution de code.
 //!
-//! All platform-specific behavior (shell selection, environment variables,
-//! executable names, and file-opening commands) is centralized here so that
-//! the rest of the application can stay platform-agnostic.
+//! Tout le comportement spécifique à une plateforme (sélection du shell, variables
+//! d'environnement, noms des exécutables et commandes d'ouverture de fichiers) est
+//! centralisé ici afin que le reste de l'application puisse rester agnostique à la plateforme.
 
-/// The shell used to spawn the integrated terminal.
+/// Le shell utilisé pour lancer le terminal intégré.
 ///
-/// - Windows: PowerShell (widely available and scriptable).
-/// - Unix (Linux/macOS): bash.
+/// - Windows : PowerShell (largement disponible et scriptable).
+/// - Unix (Linux/macOS) : bash.
 pub fn terminal_shell() -> &'static str {
     if cfg!(windows) {
         "powershell.exe"
@@ -16,15 +16,15 @@ pub fn terminal_shell() -> &'static str {
     }
 }
 
-/// Extra command-line arguments passed to the terminal shell so that it
-/// reports its current working directory via OSC 7 on every prompt.
+/// Arguments de ligne de commande supplémentaires passés au shell du terminal
+/// afin qu'il signale son répertoire de travail courant via OSC 7 à chaque invite.
 ///
-/// The file-tree sidebar relies on the terminal's reported working directory
-/// to know which folder to display, so the shell must actively emit the OSC 7
-/// sequence (bash does not do this by default).
+/// La barre latérale de l'arborescence de fichiers s'appuie sur le répertoire de
+/// travail signalé par le terminal pour savoir quel dossier afficher, le shell doit
+/// donc émettre activement la séquence OSC 7 (bash ne le fait pas par défaut).
 ///
-/// - Windows: PowerShell is told to emit OSC 7 from its `prompt` function.
-/// - Unix: bash is started with an init file that sets up OSC 7 emission.
+/// - Windows : PowerShell est configuré pour émettre OSC 7 depuis sa fonction `prompt`.
+/// - Unix : bash est lancé avec un fichier d'initialisation qui configure l'émission OSC 7.
 pub fn terminal_shell_args() -> Vec<String> {
     vec![
         if cfg!(windows) {
@@ -58,18 +58,18 @@ pub fn terminal_shell_args() -> Vec<String> {
     .collect()
 }
 
-/// Path to a generated shell init file that makes the shell report its current
-/// working directory via OSC 7 on every prompt.
+/// Chemin vers un fichier d'initialisation de shell généré qui fait que le shell
+/// signale son répertoire de travail courant via OSC 7 à chaque invite.
 ///
-/// The file is written to the platform temp directory and is idempotent: it is
-/// regenerated on every call, so it always reflects the current logic.
+/// Le fichier est écrit dans le répertoire temporaire de la plateforme et est
+/// idempotent : il est régénéré à chaque appel, reflétant ainsi toujours la logique actuelle.
 fn osc7_init_file() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("rustagent");
     let _ = std::fs::create_dir_all(&dir);
 
     if cfg!(windows) {
         let path = dir.join("osc7.ps1");
-        let content = r#"# rustagent OSC 7 init file for PowerShell.
+        let content = r#"# rustagent fichier d'initialisation OSC 7 pour PowerShell.
 function prompt {
     $p = $PWD.Path.Replace('\', '/').Replace(' ', '%20')
     $esc = [char]27
@@ -83,13 +83,13 @@ Clear-Host
         path
     } else {
         let path = dir.join("osc7.bash");
-        let content = r#"# rustagent OSC 7 init file.
-# Preserve the user's normal bash customizations.
+        let content = r#"# rustagent fichier d'initialisation OSC 7.
+# Préserve les personnalisations bash normales de l'utilisateur.
 if [ -f "$HOME/.bashrc" ]; then
     . "$HOME/.bashrc"
 fi
 
-# Emit the current working directory via OSC 7 so the app can track it.
+# Émet le répertoire de travail courant via OSC 7 afin que l'application puisse le suivre.
 __rustagent_osc7() {
     local encoded="" c
     local i
@@ -109,10 +109,10 @@ PROMPT_COMMAND="__rustagent_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
     }
 }
 
-/// Environment variables to set on the terminal shell.
+/// Variables d'environnement à définir sur le shell du terminal.
 ///
-/// `TERM`, `COLORTERM`, and `LANG` are Unix-specific and are only set on
-/// non-Windows platforms. Windows terminals do not use these variables.
+/// `TERM`, `COLORTERM` et `LANG` sont spécifiques à Unix et ne sont définies que
+/// sur les plateformes non-Windows. Les terminaux Windows n'utilisent pas ces variables.
 pub fn terminal_env() -> Vec<(&'static str, &'static str)> {
     let mut env = Vec::new();
     if !cfg!(windows) {
@@ -123,19 +123,19 @@ pub fn terminal_env() -> Vec<(&'static str, &'static str)> {
     env
 }
 
-/// The Python interpreter command.
+/// La commande de l'interpréteur Python.
 ///
-/// - Windows: `python` (the standard launcher).
-/// - Unix: `python3`.
+/// - Windows : `python` (le lanceur standard).
+/// - Unix : `python3`.
 pub fn python_command() -> &'static str {
     if cfg!(windows) { "python" } else { "python3" }
 }
 
-/// Build the command that opens a file with the default application.
+/// Construit la commande qui ouvre un fichier avec l'application par défaut.
 ///
-/// - Windows: `start "" "file"`.
-/// - macOS: `open "file"`.
-/// - Linux: `xdg-open "file"`.
+/// - Windows : `start "" "file"`.
+/// - macOS : `open "file"`.
+/// - Linux : `xdg-open "file"`.
 pub fn open_command(file: &str) -> String {
     if cfg!(windows) {
         format!("start \"\" \"{}\"\r\n", file)
@@ -146,57 +146,57 @@ pub fn open_command(file: &str) -> String {
     }
 }
 
-/// The C compiler command.
+/// La commande du compilateur C.
 ///
-/// - Windows: `gcc` (assumes MinGW or similar in PATH).
-/// - Unix: `gcc`.
+/// - Windows : `gcc` (suppose MinGW ou similaire dans le PATH).
+/// - Unix : `gcc`.
 pub fn c_compiler() -> &'static str {
     "gcc"
 }
 
-/// The C++ compiler command.
+/// La commande du compilateur C++.
 ///
-/// - Windows: `g++` (assumes MinGW or similar in PATH).
-/// - Unix: `g++`.
+/// - Windows : `g++` (suppose MinGW ou similaire dans le PATH).
+/// - Unix : `g++`.
 pub fn cpp_compiler() -> &'static str {
     "g++"
 }
 
-/// The Java compiler command.
+/// La commande du compilateur Java.
 pub fn java_compiler() -> &'static str {
     "javac"
 }
 
-/// The Java runtime command.
+/// La commande d'exécution Java (runtime).
 pub fn java_runtime() -> &'static str {
     "java"
 }
 
-/// The Go runner command.
+/// La commande d'exécution Go.
 pub fn go_runner() -> &'static str {
     "go"
 }
 
-/// The Node.js runner command.
+/// La commande d'exécution Node.js.
 pub fn node_runner() -> &'static str {
     "node"
 }
 
-/// The TypeScript runner command (via ts-node).
+/// La commande d'exécution TypeScript (via ts-node).
 pub fn ts_runner() -> &'static str {
     "npx ts-node"
 }
 
-/// The Rust compiler command.
+/// La commande du compilateur Rust.
 pub fn rust_compiler() -> &'static str {
     "rustc"
 }
 
-/// The directory where the application stores its configuration files.
+/// Le répertoire où l'application stocke ses fichiers de configuration.
 ///
-/// - Windows: `%APPDATA%\rustagent`
-/// - macOS: `$HOME/Library/Application Support/rustagent`
-/// - Linux: `$XDG_CONFIG_HOME/rustagent` or `$HOME/.config/rustagent`
+/// - Windows : `%APPDATA%\rustagent`
+/// - macOS : `$HOME/Library/Application Support/rustagent`
+/// - Linux : `$XDG_CONFIG_HOME/rustagent` ou `$HOME/.config/rustagent`
 pub fn config_dir() -> std::path::PathBuf {
     if cfg!(windows) {
         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -210,7 +210,7 @@ pub fn config_dir() -> std::path::PathBuf {
                 .join("rustagent");
         }
     } else {
-        // Linux / other Unix
+        // Linux / autres Unix
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
             return std::path::PathBuf::from(xdg).join("rustagent");
         }
@@ -220,6 +220,6 @@ pub fn config_dir() -> std::path::PathBuf {
                 .join("rustagent");
         }
     }
-    // Fallback: current directory
+    // Repli : répertoire courant
     std::path::PathBuf::from(".rustagent")
 }
