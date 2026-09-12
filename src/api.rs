@@ -1,11 +1,18 @@
 //! API error handling, retry, and timeout logic.
 //!
-//! This module wraps the rig completion call so that failures are categorized
-//! into user-friendly buckets (authentication, rate limit, network, timeout,
-//! model, other) and transient failures are retried with exponential backoff.
+//! This module wraps the Albert API completion calls so that failures are categorized
+//! into user-friendly buckets and transient failures are retried with exponential backoff.
+//! It also provides the multi-turn agentic loop supporting MCP tool calling.
 
+use std::fs;
 use std::time::Duration;
 use futures_util::StreamExt;
+use rig::completion::ToolDefinition;
+use rig::tool::Tool;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::mcp::McpClient;
 
 /// The maximum number of attempts (including the initial one) for a request.
 const MAX_ATTEMPTS: u32 = 3;
@@ -200,15 +207,8 @@ fn backoff_delay(attempt: u32) -> Duration {
     exp.min(MAX_BACKOFF)
 }
 
-/// Run a completion future with a timeout and retry/backoff for transient
-/// failures.
-///
-/// `attempt` is the closure that performs one request and returns
-/// `Result<String, String>` (the error string is the raw error text). The
-/// closure is called up to `MAX_ATTEMPTS` times.
-///
-/// Returns `Ok(response)` on success, or `Err((category, message))` where
-/// `message` is a user-friendly explanation.
+/// Run a completion future with a timeout and retry/backoff for transient failures.
+/// Conserve et propage systématiquement les détails de l'erreur brute.
 #[allow(dead_code)]
 pub async fn prompt_with_retry<F, Fut>(mut attempt: F) -> Result<String, (ApiErrorCategory, String)>
 where
@@ -219,7 +219,6 @@ where
     let mut last_raw = String::new();
 
     for attempt_index in 0..MAX_ATTEMPTS {
-        // Wrap the request in a timeout so the UI never hangs indefinitely.
         let result = tokio::time::timeout(REQUEST_TIMEOUT, attempt()).await;
 
         match result {
@@ -227,35 +226,419 @@ where
             Ok(Err(raw)) => {
                 last_raw = raw.clone();
                 last_category = classify_error(&raw);
+
+                // Si l'erreur n'est pas transitoire, on s'arrête tout de suite
+                // et on renvoie immédiatement le message détaillé brut !
                 if !is_transient(last_category) {
-                    // Non-transient: don't retry.
-                    return Err((last_category, last_category.user_message().to_string()));
+                    let full_err_msg = format!("{}\n\nDétails techniques :\n```\n{}\n```", last_category.user_message(), last_raw);
+                    return Err((last_category, full_err_msg));
                 }
             }
             Err(_elapsed) => {
                 last_category = ApiErrorCategory::Timeout;
-                last_raw = "request timed out".to_string();
+                last_raw = "La requête vers Albert API a dépassé le délai imparti (timeout).".to_string();
             }
         }
 
-        // If this was the last attempt, give up.
         if attempt_index + 1 >= MAX_ATTEMPTS {
             break;
         }
 
-        // Wait with exponential backoff before retrying.
         tokio::time::sleep(backoff_delay(attempt_index)).await;
     }
 
-    let mut message = last_category.user_message().to_string();
-    if !last_raw.is_empty() {
-        message.push_str(&format!("\n\nDetails: {}", last_raw));
-    }
-    Err((last_category, message))
+    let full_err_msg = format!("{}\n\nDétails techniques :\n```\n{}\n```", last_category.user_message(), last_raw);
+    Err((last_category, full_err_msg))
 }
 
-/// Run a streaming completion request with retries for transient stream initialization failures,
-/// token-by-token callback dispatching (`on_chunk`), mid-stream error reporting, and cancellation support.
+// ---------------------------------------------------------------------------
+// Modèles JSON OpenAI / Albert pour la gestion du Function Calling
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub call_type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatCompletionRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChatCompletionResponse {
+    pub choices: Vec<Choice>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Choice {
+    pub message: ChatMessage,
+}
+
+/// Boucle agentique multi-tours supportant `tool_choice: "auto"` pour Albert / DeepSeek.
+pub async fn run_agent_loop(
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    mcp: &McpClient,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+
+    // 1. Récupération dynamique des outils MCP
+    let mcp_tools = mcp.list_tools().await.map_err(|e| e.to_string())?;
+    let tools_payload: Vec<Value> = mcp_tools
+        .into_iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description.unwrap_or_default(),
+                    "parameters": t.input_schema
+                }
+            })
+        })
+        .collect();
+
+    let has_tools = !tools_payload.is_empty();
+
+    // 2. Historique initial
+    let mut messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: Some(system_prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: Some(user_prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    ];
+
+    // 3. Boucle agentique (jusqu'à 20 itérations max)
+    for iteration in 0..20 {
+        println!("[AGENT] Itération {}", iteration + 1);
+
+        let req = ChatCompletionRequest {
+            model: model.to_string(),
+            messages: messages.clone(),
+            tools: if has_tools { Some(tools_payload.clone()) } else { None },
+            tool_choice: if has_tools { Some("auto".to_string()) } else { None },
+        };
+
+        let res = client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| format!("Erreur réseau: {}", e))?;
+
+        if !res.status().is_success() {
+            let err_text = res.text().await.unwrap_or_default();
+            return Err(format!("Erreur API: {}", err_text));
+        }
+
+        let body: ChatCompletionResponse = res
+            .json()
+            .await
+            .map_err(|e| format!("Erreur parsing JSON: {}", e))?;
+
+        let choice = body.choices.into_iter().next().ok_or("Réponse API vide")?;
+        let assistant_msg = choice.message;
+
+        // Le modèle a-t-il décidé d'appeler des outils ?
+        if let Some(tool_calls) = &assistant_msg.tool_calls {
+            if !tool_calls.is_empty() {
+                messages.push(assistant_msg.clone());
+
+                for call in tool_calls {
+                    println!("[MCP EXEC] Appel de {} avec args: {}", call.function.name, call.function.arguments);
+
+                    let args: Value = serde_json::from_str(&call.function.arguments)
+                        .unwrap_or_else(|_| json!({}));
+
+                    // Exécution sur le serveur MCP via stdio
+                    let tool_result = match mcp.call_tool(&call.function.name, args).await {
+                        Ok(res) => res,
+                        Err(e) => format!("Erreur MCP: {}", e),
+                    };
+
+                    println!("[MCP RÉSULTAT] {} octets", tool_result.len());
+
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(tool_result),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                    });
+                }
+                continue;
+            }
+        }
+
+        // Réponse finale formulée par le modèle
+        if let Some(content) = assistant_msg.content {
+            if !content.trim().is_empty() {
+                return Ok(content);
+            }
+        }
+    }
+
+    Err("Nombre maximum d'itérations atteint sans réponse".to_string())
+}
+
+/// Boucle agentique multi-tours supportant `tool_choice: "auto"` avec streaming d'évènements SSE.
+pub async fn run_agent_loop_stream<C>(
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    mcp: &McpClient,
+    mut on_chunk: C,
+) -> Result<String, String>
+where
+    C: FnMut(&str),
+{
+    let client = reqwest::Client::new();
+    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+
+    // Récupération dynamique de tous les outils MCP
+    let mcp_tools = mcp.list_tools().await.map_err(|e| e.to_string())?;
+    let tools_payload: Vec<Value> = mcp_tools
+        .into_iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description.unwrap_or_default(),
+                    "parameters": t.input_schema
+                }
+            })
+        })
+        .collect();
+
+    let has_tools = !tools_payload.is_empty();
+
+    let mut messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: Some(system_prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: Some(user_prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    ];
+
+    for iteration in 0..20 {
+        println!("[AGENT] Tour {}", iteration + 1);
+
+        let req = json!({
+            "model": model,
+            "messages": messages,
+            "tools": if has_tools { Some(&tools_payload) } else { None },
+            "tool_choice": if has_tools { Some("auto") } else { None },
+            "stream": true
+        });
+
+      let res = client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|e| format!("Erreur réseau (connexion impossible) : {}", e))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let err_body = res.text().await.unwrap_or_else(|_| "Impossible de lire le corps de l'erreur".to_string());
+            eprintln!("[ALBERT API ERROR {}] {}", status, err_body);
+            return Err(format!("HTTP {} : {}", status, err_body));
+        }
+
+        let mut stream = res.bytes_stream();
+        let mut buffer = String::new();
+        let mut full_content = String::new();
+        let mut tool_calls_map: std::collections::BTreeMap<usize, (String, String, String)> =
+            std::collections::BTreeMap::new();
+
+        while let Some(chunk_res) = stream.next().await {
+            let bytes = chunk_res.map_err(|e| e.to_string())?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim().to_string();
+                buffer = buffer[pos + 1..].to_string();
+
+                if line.starts_with("data: ") {
+                    let data = line["data: ".len()..].trim();
+                    if data == "[DONE]" {
+                        break;
+                    }
+
+                    if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                        if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
+                            if let Some(choice) = choices.get(0) {
+                                if let Some(delta) = choice.get("delta") {
+                                    // 1. Text streamé
+                                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                                        if !content.is_empty() {
+                                            full_content.push_str(content);
+                                            on_chunk(content);
+                                        }
+                                    }
+
+                                    // 2. Assemblage des tool calls
+                                    if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                                        for call in calls {
+                                            let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                            let entry = tool_calls_map
+                                                .entry(idx)
+                                                .or_insert((String::new(), String::new(), String::new()));
+
+                                            if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+                                                entry.0.push_str(id);
+                                            }
+                                            if let Some(func) = call.get("function") {
+                                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                                                    entry.1.push_str(name);
+                                                }
+                                                if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                                                    entry.2.push_str(args);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Si le modèle a demandé l'exécution d'un ou plusieurs outils
+        if !tool_calls_map.is_empty() {
+            let mut calls_vec = Vec::new();
+            for (id, name, args) in tool_calls_map.values() {
+                calls_vec.push(ToolCall {
+                    id: id.clone(),
+                    call_type: "function".to_string(),
+                    function: FunctionCall {
+                        name: name.clone(),
+                        arguments: args.clone(),
+                    },
+                });
+            }
+
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: if full_content.is_empty() { None } else { Some(full_content.clone()) },
+                tool_calls: Some(calls_vec.clone()),
+                tool_call_id: None,
+            });
+
+            for call in &calls_vec {
+                let status_msg = format!("\n\n⚙️ Execution de `{}`...\n\n", call.function.name);
+                on_chunk(&status_msg);
+
+               println!("[MCP CALL] {} avec args: {}", call.function.name, call.function.arguments);
+                let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
+                
+                let mut tool_result = match mcp.call_tool(&call.function.name, args).await {
+                    Ok(res) => res,
+                    Err(e) => format!("Erreur MCP: {}", e),
+                };
+
+                // Protection contre le débordement de contexte / rate limit tokens
+                // ~12 000 caractères ≈ 3 000 tokens (largement suffisant pour l'agent)
+                const MAX_TOOL_OUTPUT_CHARS: usize = 12_000;
+                if tool_result.len() > MAX_TOOL_OUTPUT_CHARS {
+                    println!("[MCP TRUNCATE] Sortie tronquée de {} à {} caractères", tool_result.len(), MAX_TOOL_OUTPUT_CHARS);
+                    tool_result.truncate(MAX_TOOL_OUTPUT_CHARS);
+                    tool_result.push_str("\n\n[... Sortie tronquée car trop volumineuse. Spécifiez un sous-dossier précis ou utilisez search_files / list_directory pour explorer pas à pas ...]");
+                }
+
+                messages.push(ChatMessage {
+                    role: "tool".to_string(),
+                    content: Some(tool_result),
+                    tool_calls: None,
+                    tool_call_id: Some(call.id.clone()),
+                });
+            }
+
+            // Réinitialisation du texte pour le tour suivant
+            full_content.clear();
+            continue;
+        }
+
+        if !full_content.trim().is_empty() {
+            return Ok(full_content);
+        }
+    }
+
+    Err("Nombre maximum d'itérations atteint".to_string())
+}
+#[derive(Debug, thiserror::Error)]
+#[error("Math execution error: {0}")]
+pub struct MathError(pub String);
+
+#[derive(Deserialize)]
+pub struct AddArgs {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Deserialize)]
+pub struct PathArgs {
+    pub path: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct Adder;
+
+#[derive(Deserialize, Serialize)]
+pub struct ReadFile;
+
+/// Run a streaming completion request with retries for transient stream initialization failures.
 pub async fn prompt_stream_with_retry<F, Fut, S, C, K>(
     mut make_stream: F,
     mut on_chunk: C,
@@ -498,7 +881,7 @@ mod tests {
             |chunk| chunks_received.push(chunk.to_string()),
             || {
                 count += 1;
-                count > 2 // Cancel after first chunk check
+                count > 2
             },
         )
         .await;
@@ -542,4 +925,3 @@ mod tests {
         assert_eq!(history.len(), 10);
     }
 }
-

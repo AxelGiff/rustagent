@@ -9,15 +9,11 @@ mod file_tree;
 mod flow;
 mod platform;
 mod theme;
+mod mcp;
 
 use freya::{clipboard::Clipboard, code_editor::*, prelude::*, terminal::*, text_edit::TextEditor};
-use futures_util::{FutureExt, StreamExt};
-use rig::{
-    agent::MultiTurnStreamItem,
-    client::CompletionClient,
-    providers::openai,
-    streaming::{StreamedAssistantContent, StreamingChat},
-};
+use futures_util::FutureExt;
+use rig::{client::CompletionClient, completion::Prompt, providers::openai};
 use ropey::Rope;
 use tokio::runtime::Builder;
 
@@ -25,7 +21,17 @@ use tokio::runtime::Builder;
 const ALBERT_ENDPOINT: &str = "https://albert.api.etalab.gouv.fr/v1";
 const ALBERT_MODEL: &str = "deepseek-v4-flash";
 
-use api::{Message, Role};
+#[derive(Clone, Debug, PartialEq)]
+enum Role {
+    AI,
+    User,
+}
+
+#[derive(Clone, Debug)]
+struct Message {
+    role: Role,
+    content: String,
+}
 
 /// A programming language supported by the editor. Each language knows its
 /// tree-sitter grammar, highlights query, file extension and how to run it.
@@ -107,68 +113,63 @@ impl SupportedLanguage {
     /// placeholder is replaced with the path to the temp file.
     fn run_command(&self, file: &std::path::Path) -> String {
         let file = file.display().to_string();
-        let newline = if cfg!(windows) { "\r\n" } else { "\n" };
         // Use the platform temp directory for compiled binaries so the
         // command works on Windows, macOS, and Linux alike.
         let temp_dir = std::env::temp_dir();
         let bin = |name: &str| temp_dir.join(name).display().to_string();
         match self {
             SupportedLanguage::Python => {
-                format!("{} {}{}", platform::python_command(), file, newline)
+                format!("{} {}\n", platform::python_command(), file)
             }
             SupportedLanguage::Rust => {
                 let out = bin("main_rs");
                 format!(
-                    "{} {} -o {} && {}{}",
+                    "{} {} -o {} && {}\n",
                     platform::rust_compiler(),
                     file,
                     out,
-                    out,
-                    newline
+                    out
                 )
             }
             SupportedLanguage::JavaScript => {
-                format!("{} {}{}", platform::node_runner(), file, newline)
+                format!("{} {}\n", platform::node_runner(), file)
             }
             SupportedLanguage::TypeScript => {
-                format!("{} {}{}", platform::ts_runner(), file, newline)
+                format!("{} {}\n", platform::ts_runner(), file)
             }
             SupportedLanguage::Html => platform::open_command(&file),
-            SupportedLanguage::Css => format!("echo 'CSS is a stylesheet, nothing to run.'{}", newline),
+            SupportedLanguage::Css => "echo 'CSS is a stylesheet, nothing to run.'\n".to_string(),
             SupportedLanguage::C => {
                 let out = bin("main_c");
                 format!(
-                    "{} {} -o {} && {}{}",
+                    "{} {} -o {} && {}\n",
                     platform::c_compiler(),
                     file,
                     out,
-                    out,
-                    newline
+                    out
                 )
             }
             SupportedLanguage::Cpp => {
                 let out = bin("main_cpp");
                 format!(
-                    "{} {} -o {} && {}{}",
+                    "{} {} -o {} && {}\n",
                     platform::cpp_compiler(),
                     file,
                     out,
-                    out,
-                    newline
+                    out
                 )
             }
             SupportedLanguage::Java => {
                 // Java requires the file name to match the public class name.
                 format!(
-                    "{} {} && {} Main{}",
+                    "{} {} && {} Main\n",
                     platform::java_compiler(),
                     file,
-                    platform::java_runtime(),
-                    newline
+                    platform::java_runtime()
                 )
             }
             SupportedLanguage::Go => {
-                format!("{} run {}{}", platform::go_runner(), file, newline)
+                format!("{} run {}\n", platform::go_runner(), file)
             }
         }
     }
@@ -320,7 +321,10 @@ fn app() -> impl IntoElement {
     // Whether the settings panel is open.
     let show_settings = use_state(|| false);
     // The API key being edited in the settings panel.
+    // The settings fields being edited in the settings panel.
     let settings_key_input = use_state(|| config::ApiKeyConfig::load().key);
+    let settings_model_input = use_state(|| ALBERT_MODEL.to_string());
+    let settings_endpoint_input = use_state(|| ALBERT_ENDPOINT.to_string());
     // Feedback message shown in the settings panel after saving.
     let settings_feedback = use_state(String::new);
 
@@ -379,33 +383,30 @@ if __name__ == "__main__":
 
     let reset_terminal = {
         let mut terminal_handle = terminal_handle;
-        let mut current_dir = current_dir;
         move |_| {
-            // Unmount the current terminal widget first so Freya remounts a fresh one
-            *terminal_handle.write() = None;
-            *current_dir.write() = std::env::current_dir().unwrap_or_default();
-            let mut terminal_handle = terminal_handle.clone();
-            spawn(async move {
-                tokio::task::yield_now().await;
-                *terminal_handle.write() = spawn_terminal();
-            });
+            // Kill the current terminal (if any) and spawn a fresh one
+            *terminal_handle.write() = spawn_terminal();
         }
     };
 
     // Save the API key entered in the settings panel to the config file.
+    // Save the API key, model, and endpoint entered in the settings panel to the config file.
     let save_api_key = {
         let mut settings_feedback = settings_feedback;
         let mut show_settings = show_settings;
         move |_| {
             let key = settings_key_input.read().trim().to_string();
-            let cfg = config::ApiKeyConfig {
-                key: key.clone(),
-                source: config::KeySource::ConfigFile,
-            };
+            let model = settings_model_input.read().trim().to_string();
+            let endpoint = settings_endpoint_input.read().trim().to_string();
+           let cfg = config::ApiKeyConfig {
+            key: key.clone(),
+            source: config::KeySource::ConfigFile,
+        };
             match cfg.validate() {
                 Ok(()) => match cfg.save() {
                     Ok(()) => {
                         *settings_feedback.write() = "API key saved to config file.".to_string();
+                        *settings_feedback.write() = "Settings saved to config file.".to_string();
                         // Close the panel after a successful save.
                         *show_settings.write() = false;
                     }
@@ -489,7 +490,7 @@ if __name__ == "__main__":
                 return;
             }
 
-            // Add AI response using streaming via rig-core with the Albert endpoint
+            // Add AI response using rig-core with the Albert endpoint
             spawn(async move {
                 // Load the Albert API key from env var or config file.
                 let api_key_config = config::ApiKeyConfig::load();
@@ -508,105 +509,124 @@ if __name__ == "__main__":
                 }
 
                 // Build an OpenAI-compatible Completions client pointed at the Albert endpoint
+                // Build an OpenAI-compatible Completions client pointed at the configured endpoint
                 let client = openai::CompletionsClient::builder()
                     .api_key(&api_key_config.key)
                     .base_url(ALBERT_ENDPOINT)
                     .build();
 
-                match client {
-                    Ok(client) => {
-                        let agent = client.agent(ALBERT_MODEL).build();
+              match client {
+                    Ok(_) => {
+                        let npx_cmd = if cfg!(target_os = "windows") {
+                            "npx.cmd"
+                        } else {
+                            "npx"
+                        };
 
-                        // Build conversation history from messages prior to this prompt
-                        let prior_messages = {
-                            let msgs = messages.read();
-                            if msgs.len() > 1 {
-                                msgs[..msgs.len() - 1].to_vec()
-                            } else {
-                                Vec::new()
+                        // 1. Démarrage du serveur MCP stdio
+                        let mcp = match mcp::McpClient::spawn(npx_cmd, &["-y", "@modelcontextprotocol/server-filesystem", "."]).await {
+                            Ok(client) => client,
+                            Err(e) => {
+                                messages.write().push(Message {
+                                    role: Role::AI,
+                                    content: format!("⚠️ Erreur au démarrage du serveur MCP: {}", e),
+                                });
+                                return;
                             }
                         };
-                        let chat_history = api::build_chat_history(
-                            &prior_messages,
-                            api::MAX_HISTORY_MESSAGES,
-                        );
 
-                        // Pre-push an empty AI message that will receive tokens incrementally as they stream in
-                        let ai_msg_index = {
-                            let mut msgs = messages.write();
-                            msgs.push(Message {
-                                role: Role::AI,
-                                content: String::new(),
-                            });
-                            msgs.len() - 1
+                        // 2. Découverte de TOUS les outils
+                        match mcp.list_tools().await {
+                            Ok(t) => {
+                                println!("[MCP] {} outils enregistrés pour le modèle :", t.len());
+                                for tool in &t {
+                                    println!("  -> {}", tool.name);
+                                }
+                            }
+                            Err(e) => {
+                                messages.write().push(Message {
+                                    role: Role::AI,
+                                    content: format!("⚠️ Erreur lors de la récupération des outils MCP: {}", e),
+                                });
+                                return;
+                            }
                         };
 
-                        let mut messages_stream = messages.clone();
-                        let result = api::prompt_stream_with_retry(
-                            || {
-                                let agent = agent.clone();
-                                let user_message = user_message.clone();
-                                let chat_history = chat_history.clone();
-                                async move {
-                                    let stream = agent.stream_chat(user_message, chat_history).await;
-                                    let mapped = stream.map(|item| match item {
-                                        Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                            StreamedAssistantContent::Text(text),
-                                        )) => Ok(text.to_string()),
-                                        Ok(_) => Ok(String::new()),
-                                        Err(e) => Err(e.to_string()),
-                                    });
-                                    Ok(Box::pin(mapped))
-                                }
-                            },
-                            |chunk| {
-                                let mut msgs = messages_stream.write();
-                                if let Some(msg) = msgs.get_mut(ai_msg_index) {
-                                    msg.content.push_str(chunk);
-                                }
-                            },
-                            || false,
-                        )
+                        // 3. Préparation de la bulle de chat pour le streaming
+                        messages.write().push(Message {
+                            role: Role::AI,
+                            content: String::new(),
+                        });
+                        let ai_msg_idx = messages.read().len() - 1;
+
+                        // 4. Exécution de la boucle agentique avec streaming
+                        let endpoint = ALBERT_ENDPOINT.to_string();
+                        let api_key = api_key_config.key.clone();
+                        let model = ALBERT_MODEL.to_string();
+                        let user_msg = user_message.clone();
+                        let mcp_clone = mcp.clone();
+                        let mut messages_stream = messages;
+
+                        let result = api::prompt_with_retry(|| {
+                            let endpoint = endpoint.clone();
+                            let api_key = api_key.clone();
+                            let model = model.clone();
+                            let user_msg = user_msg.clone();
+                            let mcp_clone = mcp_clone.clone();
+                            let mut messages_stream = messages_stream;
+
+                            async move {
+                                println!("[DEBUG] Prompt envoyé : {}", user_msg);
+                                api::run_agent_loop_stream(
+                                    &endpoint,
+                                    &api_key,
+                                    &model,
+                                   "Tu es un assistant de programmation expert. Tu as accès aux outils MCP. \
+                                IMPORTANT : Ne liste et n'explore JAMAIS les répertoires `target/`, `.git/` ou `node_modules/`. \
+                                Privilégie `list_directory` sur `src/` ou à la racine plutôt qu'un `directory_tree` global. 
+                                Si tu modifies un fichier, dès que t'as finis tu arrêtes de l'éditer et tu finis de répondre à l'utilisateur. Ne fais pas de modifications inutiles. Ne réponds jamais par 'Je ne peux pas faire ça' ou 'Je ne peux pas accéder à ce fichier'. \
+                                ",
+                                    &user_msg,
+                                    &mcp_clone,
+                                    |chunk| {
+                                        if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
+                                            msg.content.push_str(chunk);
+                                        }
+                                    },
+                                )
+                                .await
+                            }
+                        })
                         .await;
 
-                        match result {
+                      match result {
                             Ok(response) => {
-                                // Decide what to do with the complete response once streaming finishes:
-                                // inject code into the editor, or keep the raw streaming text in chat.
-                                match flow::decide_editor_action(
+                                let final_response = match flow::decide_editor_action(
                                     &response,
                                     wants_code,
                                     detected_language,
                                 ) {
                                     flow::EditorAction::Insert { language, code } => {
-                                        // Switch the editor to the detected language.
                                         *current_language.write() = language;
                                         editor.write().set_language(language.editor_language());
-                                        // Push the generated code into the shared editor state.
                                         editor.write().set(&code);
                                         editor.write().set_selection((0, 0));
                                         editor.write().parse();
                                         editor.write().measure(14., "Jetbrains Mono");
-                                        // Update the editor header title to reflect the script that was written.
-                                        *file_name.write() =
-                                            flow::derive_file_name(&code, language);
-                                        // Update the AI chat message content to the insertion confirmation.
-                                        let mut msgs = messages.write();
-                                        if let Some(msg) = msgs.get_mut(ai_msg_index) {
-                                            msg.content = flow::insertion_confirmation(language);
-                                        }
+                                        *file_name.write() = flow::derive_file_name(&code, language);
+                                        flow::insertion_confirmation(language)
                                     }
-                                    flow::EditorAction::ShowResponse => {
-                                        // The stream has already populated the complete response.
-                                    }
+                                    flow::EditorAction::ShowResponse => response,
+                                };
+
+                                if let Some(msg) = messages.write().get_mut(ai_msg_idx) {
+                                    msg.content = final_response;
                                 }
                             }
-                            Err((_category, full_err_or_partial)) => {
-                                let mut msgs = messages.write();
-                                if let Some(msg) = msgs.get_mut(ai_msg_index) {
-                                    if msg.content.is_empty() {
-                                        msg.content = format!("⚠️ {}", full_err_or_partial);
-                                    }
+                            Err((_category, message)) => {
+                                // Affiche l'erreur détaillée directement dans la bulle de chat Freya
+                                if let Some(msg) = messages.write().get_mut(ai_msg_idx) {
+                                    msg.content = format!("⚠️ **Erreur lors de l'appel :**\n\n{}", message);
                                 }
                             }
                         }
@@ -726,95 +746,8 @@ if __name__ == "__main__":
                                     .color(text_color)
                                     .into_element()
                             } else {
-                                rect()
-                                    .width(Size::fill())
-                                    .children(
-                                        flow::parse_markdown_segments(&msg.content)
-                                            .into_iter()
-                                            .map(|seg| match seg {
-                                                flow::MarkdownSegment::Text(text) => {
-                                                    MarkdownViewer::new(text)
-                                                        .color(text_color)
-                                                        .into_element()
-                                                }
-                                                flow::MarkdownSegment::CodeBlock {
-                                                    language,
-                                                    code,
-                                                } => {
-                                                    rect()
-                                                        .width(Size::fill())
-                                                        .margin(4.)
-                                                        .corner_radius(8.)
-                                                        .background(c.surface_primary)
-                                                        .border(
-                                                            Border::new()
-                                                                .fill(c.border)
-                                                                .width(BorderWidth {
-                                                                    top: 1.,
-                                                                    right: 1.,
-                                                                    bottom: 1.,
-                                                                    left: 1.,
-                                                                }),
-                                                        )
-                                                        .child(
-                                                            rect()
-                                                                .width(Size::fill())
-                                                                .height(Size::px(32.))
-                                                                .padding(4.)
-                                                                .background(c.surface_secondary)
-                                                                .content(Content::Flex)
-                                                                .horizontal()
-                                                                .cross_align(Alignment::Center)
-                                                                .main_align(Alignment::SpaceBetween)
-                                                                .child(
-                                                                    label()
-                                                                        .text(if language.is_empty() {
-                                                                            "CODE".to_string()
-                                                                        } else {
-                                                                            language.to_uppercase()
-                                                                        })
-                                                                        .font_size(11.)
-                                                                        .font_weight(FontWeight::BOLD)
-                                                                        .color(c.text_secondary),
-                                                                )
-                                                                .child(
-                                                                    Button::new()
-                                                                        .background(c.surface_tertiary)
-                                                                        .hover_background(c.tertiary)
-                                                                        .border_fill(Color::TRANSPARENT)
-                                                                        .color(c.text_secondary)
-                                                                        .on_press({
-                                                                            let code_to_copy = code.clone();
-                                                                            move |_| {
-                                                                                let _ = Clipboard::set(code_to_copy.clone());
-                                                                            }
-                                                                        })
-                                                                        .child(
-                                                                            rect()
-                                                                                .horizontal()
-                                                                                .cross_align(Alignment::Center)
-                                                                                .spacing(4.)
-                                                                                .child(label().text("📋").font_size(11.))
-                                                                                .child(label().text("Copy Code").font_size(11.)),
-                                                                        ),
-                                                                ),
-                                                        )
-                                                        .child(
-                                                            rect()
-                                                                .width(Size::fill())
-                                                                .padding(8.)
-                                                                .child(
-                                                                    SelectableText::new()
-                                                                        .span(code)
-                                                                        .color(c.text_primary)
-                                                                        .font_family("Jetbrains Mono")
-                                                                        .into_element(),
-                                                                ),
-                                                        )
-                                                        .into_element()
-                                                }
-                                            }),
-                                    )
+                                MarkdownViewer::new(msg.content.clone())
+                                    .color(text_color)
                                     .into_element()
                             }),
                     )
@@ -862,33 +795,6 @@ if __name__ == "__main__":
         .child(chat_area)
         .child(input_area);
 
-    // Execute button for code (styled with a green play triangle icon)
-    let execute_button = Button::new()
-        .background(c.surface_tertiary)
-        .hover_background(c.tertiary)
-        .border_fill(Color::TRANSPARENT)
-        .color(c.text_secondary)
-        .on_press(execute_code)
-        .child(
-            rect()
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(6.)
-                .child(
-                    label()
-                        .text("▶")
-                        .font_size(14.)
-                        .font_weight(FontWeight::BOLD)
-                        .color(Color::from_rgb(34, 197, 94)),
-                )
-                .child(
-                    label()
-                        .text("Execute Code")
-                        .font_size(13.)
-                        .color(c.text_secondary),
-                ),
-        );
-
     // Toolbar
     let toolbar = rect()
         .width(Size::fill())
@@ -901,10 +807,10 @@ if __name__ == "__main__":
             bottom: 1.,
             left: 0.,
         }))
-        .content(Content::Flex)
         .horizontal()
         .cross_align(Alignment::Center)
-        .main_align(Alignment::SpaceBetween)
+        .spacing(8.)
+        .content(Content::Flex)
         .child(
             label()
                 .text("Coding Assistant")
@@ -912,44 +818,78 @@ if __name__ == "__main__":
                 .font_size(16.)
                 .font_weight(FontWeight::BOLD),
         )
+        .child(rect().width(Size::flex(1.)))
         .child(
-            rect()
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(8.)
-                .child(
-                    Button::new()
-                        .background(c.surface_tertiary)
-                        .hover_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_secondary)
-                        .on_press({
-                            let mut show_settings = show_settings;
-                            move |_| {
-                                *show_settings.write() = true;
-                            }
-                        })
-                        .child("Settings"),
-                )
-                .child(
-                    Button::new()
-                        .background(c.surface_tertiary)
-                        .hover_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_secondary)
-                        .on_press(clear_chat)
-                        .child("Clear Chat"),
-                )
-                .child(
-                    Button::new()
-                        .background(c.surface_tertiary)
-                        .hover_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_secondary)
-                        .on_press(reset_terminal)
-                        .child("Reset Terminal"),
-                )
-                .child(execute_button),
+            Button::new()
+                .background(c.surface_tertiary)
+                .hover_background(c.tertiary)
+                .border_fill(Color::TRANSPARENT)
+                .color(c.text_secondary)
+                .on_press({
+                    let mut show_settings = show_settings;
+                    move |_| {
+                        *show_settings.write() = true;
+                    }
+                })
+                .child("Settings"),
+        )
+        .child(
+            Button::new()
+                .background(c.surface_tertiary)
+                .hover_background(c.tertiary)
+                .border_fill(Color::TRANSPARENT)
+                .color(c.text_secondary)
+                .on_press(clear_chat)
+                .child("Clear Chat"),
+        )
+        .child(
+            Button::new()
+                .background(c.surface_tertiary)
+                .hover_background(c.tertiary)
+                .border_fill(Color::TRANSPARENT)
+                .color(c.text_secondary)
+                .on_press(reset_terminal)
+                .child("Reset Terminal"),
+        )
+        .child(
+            Button::new()
+                .background(c.surface_tertiary)
+                .hover_background(c.tertiary)
+                .border_fill(Color::TRANSPARENT)
+                .color(c.text_secondary)
+                .on_press(execute_code)
+                .child("Execute Code"),
+        );
+
+    // Execute button for code
+    let execute_button = Button::new()
+        .background(c.surface_tertiary)
+        .hover_background(c.tertiary)
+        .border_fill(Color::TRANSPARENT)
+        .color(c.text_secondary)
+        .on_press(execute_code)
+        .child("Execute Code");
+
+    // A web image stretched across both panels as a decorative overlay. It is
+    // wrapped in a non-interactive rect so it never blocks pointer events from
+    // reaching the chat or terminal underneath, and it is placed on the overlay
+    // layer so it always renders on top of the panels.
+    let overlay = rect()
+        .layer(Layer::Overlay)
+        .position(Position::new_absolute().top(0.).left(0.))
+        .width(Size::fill())
+        .height(Size::fill())
+        .interactive(Interactive::No)
+        .child(
+            ImageViewer::new(
+                "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&h=700&fit=crop",
+            )
+            .decode_mode(DecodeMode::Custom(Size2D::new(1200., 700.)))
+            .aspect_ratio(AspectRatio::None)
+            .image_cover(ImageCover::Fill)
+            .width(Size::fill())
+            .height(Size::fill())
+            .opacity(0.35),
         );
 
     rect()
@@ -969,7 +909,19 @@ if __name__ == "__main__":
                             ),
                         )
                         .panel(
-                            ResizablePanel::new(PanelSize::percent(30.)).child(chat_panel),
+                            ResizablePanel::new(PanelSize::percent(30.)).child(
+                                rect()
+                                    .expanded()
+                                    .content(Content::Flex)
+                                    .child(chat_panel)
+                                    .child(
+                                        rect()
+                                            .width(Size::fill())
+                                            .height(Size::px(40.))
+                                            .padding(8.)
+                                            .child(execute_button),
+                                    ),
+                            ),
                         )
                         .panel(
                             ResizablePanel::new(PanelSize::percent(50.)).child(
@@ -993,10 +945,12 @@ if __name__ == "__main__":
                             ),
                         ),
                 )
-               .child(if *show_settings.read() {
+                .child(overlay)
+                .child(if *show_settings.read() {
                     settings_panel(
-                        c.clone(),
                         settings_key_input.into(),
+                        settings_model_input.into(),
+                        settings_endpoint_input.into(),
                         settings_feedback.into(),
                         save_api_key,
                         close_settings,
@@ -1013,9 +967,11 @@ if __name__ == "__main__":
 }
 
 /// A modal settings panel for configuring the Albert API key.
+/// A modal settings panel for configuring the Albert API key, model, and endpoint.
 fn settings_panel<H1, H2>(
-    c: ColorsSheet,
     key_input: Writable<String>,
+    model_input: Writable<String>,
+    endpoint_input: Writable<String>,
     feedback: Writable<String>,
     on_save: H1,
     on_close: H2,
@@ -1024,15 +980,14 @@ where
     H1: Into<EventHandler<Event<PressEventData>>>,
     H2: Into<EventHandler<Event<PressEventData>>>,
 {
+    let c = use_theme().read().colors.clone();
     rect()
         .layer(Layer::Overlay)
         .position(Position::new_absolute().top(0.).left(0.))
         .width(Size::fill())
         .height(Size::fill())
         .background(c.overlay)
-        .content(Content::Flex)
-        .cross_align(Alignment::Center)
-        .main_align(Alignment::Center)
+        .center()
         .child(
             rect()
                 .width(Size::px(480.))
@@ -1040,8 +995,8 @@ where
                 .background(c.surface_primary)
                 .corner_radius(12.)
                 .shadow(Shadow::new().x(0.).y(4.).blur(20.).color(c.shadow))
+                .content(Content::Flex)
                 .spacing(12.)
-
                 .child(
                     label()
                         .text("Settings")
@@ -1062,6 +1017,36 @@ where
                         .border_fill(Color::TRANSPARENT)
                         .color(c.text_inverse)
                         .placeholder("sk-...")
+                        .width(Size::fill()),
+                )
+                .child(
+                    label()
+                        .text("AI Model")
+                        .color(c.text_secondary)
+                        .font_size(13.),
+                )
+                .child(
+                    Input::new(model_input)
+                        .background(c.surface_secondary)
+                        .focus_background(c.surface_tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_inverse)
+                        .placeholder("deepseek-v4-flash")
+                        .width(Size::fill()),
+                )
+                .child(
+                    label()
+                        .text("API Endpoint URL")
+                        .color(c.text_secondary)
+                        .font_size(13.),
+                )
+                .child(
+                    Input::new(endpoint_input)
+                        .background(c.surface_secondary)
+                        .focus_background(c.surface_tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_inverse)
+                        .placeholder("https://albert.api.etalab.gouv.fr/v1")
                         .width(Size::fill()),
                 )
                 .child(
@@ -1237,68 +1222,30 @@ fn terminal_panel(
         let mut handle_for_future = handle_for_future.clone();
         let mut current_dir_for_future = current_dir_for_future.clone();
         async move {
+            let terminal_handle = handle_for_future.read().clone();
+            let Some(terminal_handle) = terminal_handle else {
+                return;
+            };
             loop {
-                let current_handle = handle_for_future.read().clone();
-                let Some(terminal_handle) = current_handle else {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    continue;
-                };
-
-                if let Some(cwd) = terminal_handle.cwd() {
-                    if *current_dir_for_future.read() != cwd {
-                        *current_dir_for_future.write() = cwd;
-                    }
-                }
-
-                let mut closed = terminal_handle.closed().fuse();
-                let mut clipboard = terminal_handle.clipboard_changed().fuse();
-                let mut output = terminal_handle.output_received().fuse();
-
-                loop {
-                    let active_handle = handle_for_future.read().clone();
-                    let is_same = match (&active_handle, &terminal_handle) {
-                        (Some(h1), h2) => h1.id() == h2.id(),
-                        _ => false,
-                    };
-                    if !is_same {
+                futures_util::select! {
+                    _ = terminal_handle.closed().fuse() => {
+                        let _ = handle_for_future.write().take();
                         break;
                     }
-
-                    let timer = tokio::time::sleep(std::time::Duration::from_millis(300)).fuse();
-                    futures_util::pin_mut!(timer);
-
-                    futures_util::select! {
-                        _ = &mut timer => {
-                            if let Some(cwd) = terminal_handle.cwd()
-                                && *current_dir_for_future.read() != cwd
-                            {
-                                *current_dir_for_future.write() = cwd;
-                            }
+                    _ = terminal_handle.clipboard_changed().fuse() => {
+                        if let Some(text) = terminal_handle.clipboard_content() {
+                            let _ = Clipboard::set(text);
                         }
-                        _ = &mut closed => {
-                            let active_handle = handle_for_future.read().clone();
-                            let is_same = match (&active_handle, &terminal_handle) {
-                                (Some(h1), h2) => h1.id() == h2.id(),
-                                _ => false,
-                            };
-                            if is_same {
-                                *handle_for_future.write() = spawn_terminal();
-                            }
-                            break;
-                        }
-                        _ = &mut clipboard => {
-                            if let Some(text) = terminal_handle.clipboard_content() {
-                                let _ = Clipboard::set(text);
-                            }
-                            clipboard = terminal_handle.clipboard_changed().fuse();
-                        }
-                        _ = &mut output => {
-                            if let Some(cwd) = terminal_handle.cwd()
-                                && *current_dir_for_future.read() != cwd
-                            {
-                                *current_dir_for_future.write() = cwd;
-                            }
-                            output = terminal_handle.output_received().fuse();
+                    }
+                    _ = terminal_handle.output_received().fuse() => {
+                        // The shell reports its working directory via OSC 7 on
+                        // every prompt. Whenever new output arrives, check the
+                        // reported directory and update the sidebar if it
+                        // changed (e.g. after the user runs `cd`).
+                        if let Some(cwd) = terminal_handle.cwd()
+                            && *current_dir_for_future.read() != cwd
+                        {
+                            *current_dir_for_future.write() = cwd;
                         }
                     }
                 }
