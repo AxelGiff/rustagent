@@ -5,11 +5,13 @@
 
 mod api;
 mod config;
+mod diff;
 mod file_tree;
 mod flow;
+mod mcp;
+mod myers;
 mod platform;
 mod theme;
-mod mcp;
 
 use freya::{clipboard::Clipboard, code_editor::*, prelude::*, terminal::*, text_edit::TextEditor};
 use futures_util::FutureExt;
@@ -607,13 +609,27 @@ if __name__ == "__main__":
                                     detected_language,
                                 ) {
                                     flow::EditorAction::Insert { language, code } => {
+                                        let target_file = flow::find_target_file(&user_message, &file_name.read());
+                                        let display_name = target_file.clone().unwrap_or_else(|| file_name.read().clone());
+                                        let old_code = if let Some(ref path) = target_file {
+                                            std::fs::read_to_string(path).unwrap_or_else(|_| editor.read().rope.to_string())
+                                        } else {
+                                            editor.read().rope.to_string()
+                                        };
+
+                                        myers::log_myers_diff(&display_name, &old_code, &code);
+
+                                        if let Some(ref path) = target_file {
+                                            let _ = std::fs::write(path, &code);
+                                        }
+
                                         *current_language.write() = language;
                                         editor.write().set_language(language.editor_language());
                                         editor.write().set(&code);
                                         editor.write().set_selection((0, 0));
                                         editor.write().parse();
                                         editor.write().measure(14., "Jetbrains Mono");
-                                        *file_name.write() = flow::derive_file_name(&code, language);
+                                        *file_name.write() = display_name;
                                         flow::insertion_confirmation(language)
                                     }
                                     flow::EditorAction::ShowResponse => response,

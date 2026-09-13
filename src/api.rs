@@ -208,7 +208,6 @@ fn backoff_delay(attempt: u32) -> Duration {
 }
 
 /// Run a completion future with a timeout and retry/backoff for transient failures.
-/// Conserve et propage systématiquement les détails de l'erreur brute.
 #[allow(dead_code)]
 pub async fn prompt_with_retry<F, Fut>(mut attempt: F) -> Result<String, (ApiErrorCategory, String)>
 where
@@ -226,17 +225,17 @@ where
             Ok(Err(raw)) => {
                 last_raw = raw.clone();
                 last_category = classify_error(&raw);
-
-                // Si l'erreur n'est pas transitoire, on s'arrête tout de suite
-                // et on renvoie immédiatement le message détaillé brut !
                 if !is_transient(last_category) {
-                    let full_err_msg = format!("{}\n\nDétails techniques :\n```\n{}\n```", last_category.user_message(), last_raw);
-                    return Err((last_category, full_err_msg));
+                    let mut message = last_category.user_message().to_string();
+                    if !raw.is_empty() {
+                        message.push_str(&format!("\n\nDetails: {}", raw));
+                    }
+                    return Err((last_category, message));
                 }
             }
             Err(_elapsed) => {
                 last_category = ApiErrorCategory::Timeout;
-                last_raw = "La requête vers Albert API a dépassé le délai imparti (timeout).".to_string();
+                last_raw = "request timed out".to_string();
             }
         }
 
@@ -247,8 +246,11 @@ where
         tokio::time::sleep(backoff_delay(attempt_index)).await;
     }
 
-    let full_err_msg = format!("{}\n\nDétails techniques :\n```\n{}\n```", last_category.user_message(), last_raw);
-    Err((last_category, full_err_msg))
+    let mut message = last_category.user_message().to_string();
+    if !last_raw.is_empty() {
+        message.push_str(&format!("\n\nDetails: {}", last_raw));
+    }
+    Err((last_category, message))
 }
 
 // ---------------------------------------------------------------------------
@@ -346,8 +348,8 @@ pub async fn run_agent_loop(
         },
     ];
 
-    // 3. Boucle agentique (jusqu'à 20 itérations max)
-    for iteration in 0..20 {
+    // 3. Boucle agentique (jusqu'à 5 itérations max)
+    for iteration in 0..5 {
         println!("[AGENT] Itération {}", iteration + 1);
 
         let req = ChatCompletionRequest {
@@ -435,7 +437,6 @@ where
     let client = reqwest::Client::new();
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
-    // Récupération dynamique de tous les outils MCP
     let mcp_tools = mcp.list_tools().await.map_err(|e| e.to_string())?;
     let tools_payload: Vec<Value> = mcp_tools
         .into_iter()
@@ -468,30 +469,27 @@ where
         },
     ];
 
-    for iteration in 0..20 {
-        println!("[AGENT] Tour {}", iteration + 1);
-
+    for _iteration in 0..8 {
         let req = json!({
             "model": model,
             "messages": messages,
-            "tools": if has_tools { Some(&tools_payload) } else { None },
-            "tool_choice": if has_tools { Some("auto") } else { None },
+            "tools": if has_tools { Some(tools_payload.clone()) } else { None },
+            "tool_choice": if has_tools { Some("auto".to_string()) } else { None },
             "stream": true
         });
 
-      let res = client
+        let res = client
             .post(&url)
             .bearer_auth(api_key)
             .json(&req)
             .send()
             .await
-            .map_err(|e| format!("Erreur réseau (connexion impossible) : {}", e))?;
+            .map_err(|e| format!("Erreur réseau: {}", e))?;
 
         if !res.status().is_success() {
             let status = res.status();
-            let err_body = res.text().await.unwrap_or_else(|_| "Impossible de lire le corps de l'erreur".to_string());
-            eprintln!("[ALBERT API ERROR {}] {}", status, err_body);
-            return Err(format!("HTTP {} : {}", status, err_body));
+            let err_text = res.text().await.unwrap_or_default();
+            return Err(format!("Erreur API (HTTP {}): {}", status, err_text));
         }
 
         let mut stream = res.bytes_stream();
@@ -513,39 +511,41 @@ where
                     if data == "[DONE]" {
                         break;
                     }
-
                     if let Ok(parsed) = serde_json::from_str::<Value>(data) {
+                        if let Some(err) = parsed.get("error") {
+                            let err_msg = err["message"].as_str().unwrap_or(data);
+                            return Err(format!("Erreur Stream API: {}", err_msg));
+                        }
                         if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-                            if let Some(choice) = choices.get(0) {
-                                if let Some(delta) = choice.get("delta") {
-                                    // 1. Text streamé
+                            if let Some(first) = choices.get(0) {
+                                if let Some(delta) = first.get("delta").and_then(|d| d.as_object()) {
                                     if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
                                         if !content.is_empty() {
                                             full_content.push_str(content);
                                             on_chunk(content);
                                         }
                                     }
-
-                                    // 2. Assemblage des tool calls
                                     if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                                         for call in calls {
-                                            let idx = call.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                                            let idx = call["index"].as_u64().unwrap_or(0) as usize;
                                             let entry = tool_calls_map
                                                 .entry(idx)
                                                 .or_insert((String::new(), String::new(), String::new()));
-
                                             if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
                                                 entry.0.push_str(id);
                                             }
-                                            if let Some(func) = call.get("function") {
-                                                if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                                                    entry.1.push_str(name);
-                                                }
-                                                if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                                                    entry.2.push_str(args);
-                                                }
+                                            if let Some(name) = call["function"].get("name").and_then(|v| v.as_str()) {
+                                                entry.1.push_str(name);
+                                            }
+                                            if let Some(args) = call["function"].get("arguments").and_then(|v| v.as_str()) {
+                                                entry.2.push_str(args);
                                             }
                                         }
+                                    }
+                                } else if let Some(text) = first.get("text").and_then(|v| v.as_str()) {
+                                    if !text.is_empty() {
+                                        full_content.push_str(text);
+                                        on_chunk(text);
                                     }
                                 }
                             }
@@ -555,12 +555,16 @@ where
             }
         }
 
-        // Si le modèle a demandé l'exécution d'un ou plusieurs outils
         if !tool_calls_map.is_empty() {
             let mut calls_vec = Vec::new();
-            for (id, name, args) in tool_calls_map.values() {
+            for (idx, (id, name, args)) in tool_calls_map.values().enumerate() {
+                let call_id = if id.is_empty() {
+                    format!("call_{}", idx)
+                } else {
+                    id.clone()
+                };
                 calls_vec.push(ToolCall {
-                    id: id.clone(),
+                    id: call_id,
                     call_type: "function".to_string(),
                     function: FunctionCall {
                         name: name.clone(),
@@ -569,32 +573,40 @@ where
                 });
             }
 
-            messages.push(ChatMessage {
+            let assistant_msg = ChatMessage {
                 role: "assistant".to_string(),
-                content: if full_content.is_empty() { None } else { Some(full_content.clone()) },
+                content: if full_content.is_empty() {
+                    None
+                } else {
+                    Some(full_content.clone())
+                },
                 tool_calls: Some(calls_vec.clone()),
                 tool_call_id: None,
-            });
+            };
+            messages.push(assistant_msg);
 
             for call in &calls_vec {
-                let status_msg = format!("\n\n⚙️ Execution de `{}`...\n\n", call.function.name);
-                on_chunk(&status_msg);
+                let notice = format!("\n\n⚙️ Execution de l'outil MCP `{}`...\n\n", call.function.name);
+                on_chunk(&notice);
 
-               println!("[MCP CALL] {} avec args: {}", call.function.name, call.function.arguments);
                 let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
-                
-                let mut tool_result = match mcp.call_tool(&call.function.name, args).await {
+                let target_path = args
+                    .get("path")
+                    .or_else(|| args.get("file"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let old_content = target_path.as_deref().map(|p| std::fs::read_to_string(p).unwrap_or_default());
+
+                let tool_result = match mcp.call_tool(&call.function.name, args).await {
                     Ok(res) => res,
                     Err(e) => format!("Erreur MCP: {}", e),
                 };
 
-                // Protection contre le débordement de contexte / rate limit tokens
-                // ~12 000 caractères ≈ 3 000 tokens (largement suffisant pour l'agent)
-                const MAX_TOOL_OUTPUT_CHARS: usize = 12_000;
-                if tool_result.len() > MAX_TOOL_OUTPUT_CHARS {
-                    println!("[MCP TRUNCATE] Sortie tronquée de {} à {} caractères", tool_result.len(), MAX_TOOL_OUTPUT_CHARS);
-                    tool_result.truncate(MAX_TOOL_OUTPUT_CHARS);
-                    tool_result.push_str("\n\n[... Sortie tronquée car trop volumineuse. Spécifiez un sous-dossier précis ou utilisez search_files / list_directory pour explorer pas à pas ...]");
+                if let (Some(path), Some(old_text)) = (target_path, old_content) {
+                    let new_text = std::fs::read_to_string(&path).unwrap_or_default();
+                    if !new_text.is_empty() && new_text != old_text {
+                        crate::myers::log_myers_diff(&path, &old_text, &new_text);
+                    }
                 }
 
                 messages.push(ChatMessage {
@@ -604,19 +616,19 @@ where
                     tool_call_id: Some(call.id.clone()),
                 });
             }
-
-            // Réinitialisation du texte pour le tour suivant
-            full_content.clear();
             continue;
         }
 
         if !full_content.trim().is_empty() {
             return Ok(full_content);
         }
+
+        return Err("L'API a renvoyé une réponse vide sans appel d'outil.".to_string());
     }
 
-    Err("Nombre maximum d'itérations atteint".to_string())
+    Err("Nombre maximum d'itérations atteint sans réponse finale du modèle.".to_string())
 }
+
 #[derive(Debug, thiserror::Error)]
 #[error("Math execution error: {0}")]
 pub struct MathError(pub String);
