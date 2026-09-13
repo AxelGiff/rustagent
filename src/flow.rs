@@ -27,6 +27,32 @@ pub const ACTION_KEYWORDS: &[&str] = &[
     "script",
     "function",
     "class",
+    "edit",
+    "edite",
+    "édite",
+    "editer",
+    "éditer",
+    "modify",
+    "modifie",
+    "modifier",
+    "add",
+    "ajoute",
+    "ajouter",
+    "rajoute",
+    "rajouter",
+    "change",
+    "changer",
+    "ecris",
+    "écris",
+    "ecrire",
+    "écrire",
+    "creer",
+    "créer",
+    "generer",
+    "générer",
+    "rajoute-moi",
+    "ajoute-moi",
+    "fichier",
 ];
 
 /// Whether the user wants to clear the editor.
@@ -61,24 +87,42 @@ pub enum EditorAction {
 }
 
 /// Decide what to do with an AI response given whether the user asked for
-/// code. If the user asked for code and the response contains a matching code
-/// block, the code is extracted for insertion into the editor; otherwise the
-/// raw response is shown in the chat.
+/// code. If the response contains a matching code block, the code is extracted
+/// for insertion into the editor.
 pub fn decide_editor_action(
     response: &str,
     wants_code: bool,
     detected_language: SupportedLanguage,
 ) -> EditorAction {
-    if wants_code {
-        let code = extract_code_from_response(response, detected_language);
-        if !code.is_empty() {
-            return EditorAction::Insert {
-                language: detected_language,
-                code,
-            };
-        }
+    let code = extract_code_from_response(response, detected_language);
+    if !code.is_empty() && (wants_code || response.contains("```")) {
+        return EditorAction::Insert {
+            language: detected_language,
+            code,
+        };
     }
     EditorAction::ShowResponse
+}
+
+/// Find target file path if user specified a file in their message (e.g. `myers.rs` or `src/myers.rs`)
+/// or if a file with matching extension exists in the workspace.
+pub fn find_target_file(user_message: &str, current_file: &str) -> Option<String> {
+    for word in user_message.split_whitespace() {
+        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\');
+        if clean.contains('.') && std::path::Path::new(clean).exists() {
+            return Some(clean.to_string());
+        }
+        let src_path = format!("src/{}", clean);
+        if clean.contains('.') && std::path::Path::new(&src_path).exists() {
+            return Some(src_path);
+        }
+    }
+
+    if std::path::Path::new(current_file).exists() {
+        return Some(current_file.to_string());
+    }
+
+    None
 }
 
 /// The confirmation message shown in chat after inserting code into the editor.
