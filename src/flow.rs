@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Core chat → editor → terminal flow logic.
 //!
 //! This module holds the pure, UI-independent logic that connects the chat,

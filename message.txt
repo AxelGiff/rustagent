@@ -1,1 +1,4 @@
-Hello Rust!
+Blague du jour :
+
+Pourquoi les programmeurs préfèrent-ils le mode sombre ?
+Parce que la lumière attire les bugs ! 🐛

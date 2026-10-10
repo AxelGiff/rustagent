@@ -12,10 +12,10 @@ mod mcp;
 mod myers;
 mod platform;
 mod theme;
+mod tools;
 
-use freya::{clipboard::Clipboard, code_editor::*, prelude::*, terminal::*, text_edit::TextEditor};
+use freya::{clipboard::Clipboard, code_editor::*, prelude::*, terminal::*};
 use futures_util::FutureExt;
-use rig::{client::CompletionClient, completion::Prompt, providers::openai};
 use ropey::Rope;
 use tokio::runtime::Builder;
 
@@ -23,22 +23,22 @@ use tokio::runtime::Builder;
 const ALBERT_ENDPOINT: &str = "https://albert.api.etalab.gouv.fr/v1";
 const ALBERT_MODEL: &str = "deepseek-v4-flash";
 
-#[derive(Clone, Debug, PartialEq)]
-enum Role {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
     AI,
     User,
 }
 
-#[derive(Clone, Debug)]
-struct Message {
-    role: Role,
-    content: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
 }
 
 /// A programming language supported by the editor. Each language knows its
 /// tree-sitter grammar, highlights query, file extension and how to run it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum SupportedLanguage {
+pub enum SupportedLanguage {
     Python,
     Rust,
     JavaScript,
@@ -52,6 +52,23 @@ enum SupportedLanguage {
 }
 
 impl SupportedLanguage {
+    /// Detects supported language from a file extension.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "rs" => Some(SupportedLanguage::Rust),
+            "py" => Some(SupportedLanguage::Python),
+            "js" | "mjs" | "cjs" => Some(SupportedLanguage::JavaScript),
+            "ts" | "tsx" => Some(SupportedLanguage::TypeScript),
+            "html" | "htm" => Some(SupportedLanguage::Html),
+            "css" => Some(SupportedLanguage::Css),
+            "c" | "h" => Some(SupportedLanguage::C),
+            "cpp" | "cc" | "cxx" | "hpp" => Some(SupportedLanguage::Cpp),
+            "java" => Some(SupportedLanguage::Java),
+            "go" => Some(SupportedLanguage::Go),
+            _ => None,
+        }
+    }
+
     /// The file extension (without the dot) used for the editor label and the
     /// temp file written before execution.
     fn extension(&self) -> &'static str {
@@ -243,12 +260,24 @@ fn spawn_terminal() -> Option<TerminalHandle> {
     TerminalHandle::new(TerminalId::new(), cmd, None).ok()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CenterViewMode {
+    Editor,
+    Diff,
+}
+
 /// Builds the code editor pane. The editor state is lifted up into `app()` so
 /// that the chat and terminal panels can read/write the same content.
-fn code_editor_panel(editor: Writable<CodeEditorData>, file_name: String) -> impl IntoElement {
-    let a11y_id = use_a11y();
-    let c = use_theme().read().colors.clone();
-
+fn code_editor_panel(
+    editor: Writable<CodeEditorData>,
+    file_name: String,
+    has_pending_diffs: usize,
+    mut on_view_diff: impl FnMut() + 'static,
+    save_button: impl IntoElement,
+    execute_button: impl IntoElement,
+    a11y_id: AccessibilityId,
+    c: ColorsSheet,
+) -> impl IntoElement {
     rect()
         .expanded()
         .content(Content::Flex)
@@ -256,8 +285,8 @@ fn code_editor_panel(editor: Writable<CodeEditorData>, file_name: String) -> imp
         .child(
             rect()
                 .width(Size::fill())
-                .height(Size::px(32.))
-                .padding(8.)
+                .height(Size::px(36.))
+                .padding(Gaps::new(4., 8., 4., 8.))
                 .background(c.surface_primary)
                 .border(Border::new().fill(c.border).width(BorderWidth {
                     top: 0.,
@@ -268,11 +297,38 @@ fn code_editor_panel(editor: Writable<CodeEditorData>, file_name: String) -> imp
                 .horizontal()
                 .cross_align(Alignment::Center)
                 .child(
-                    label()
-                        .text(file_name)
-                        .color(c.text_primary)
-                        .font_size(13.)
-                        .font_weight(FontWeight::BOLD),
+                    rect()
+                        .expanded()
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .spacing(8.)
+                        .child(
+                            label()
+                                .text(file_name)
+                                .color(c.text_primary)
+                                .font_size(13.)
+                                .font_weight(FontWeight::BOLD),
+                        )
+                        .child(if has_pending_diffs > 0 {
+                            Button::new()
+                                .background(Color::from_rgb(234, 88, 12))
+                                .hover_background(Color::from_rgb(194, 65, 12))
+                                .border_fill(Color::TRANSPARENT)
+                                .color(Color::WHITE)
+                                .on_press(move |_| on_view_diff())
+                                .child(format!("📝 Diff en attente ({})", has_pending_diffs))
+                                .into_element()
+                        } else {
+                            rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                        }),
+                )
+                .child(
+                    rect()
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .spacing(6.)
+                        .child(save_button)
+                        .child(execute_button),
                 ),
         )
         .child(
@@ -283,12 +339,310 @@ fn code_editor_panel(editor: Writable<CodeEditorData>, file_name: String) -> imp
         )
 }
 
+/// A dedicated diff preview panel for user review before accepting or rejecting file modifications.
+fn diff_viewer_panel(
+    pending_diffs: Writable<Vec<diff::PendingDiff>>,
+    mut on_accept: impl FnMut(usize) + 'static,
+    mut on_reject: impl FnMut(usize) + 'static,
+    mut on_reject_all: impl FnMut() + 'static,
+    mut on_switch_to_editor: impl FnMut() + 'static,
+    colors: ColorsSheet,
+) -> impl IntoElement {
+    let diffs = pending_diffs.read().clone();
+    if diffs.is_empty() {
+        return rect()
+            .expanded()
+            .center()
+            .background(colors.background)
+            .child(label().text("Aucun diff en attente.").color(colors.text_secondary))
+            .into_element();
+    }
+
+    let diff = &diffs[0];
+    let diff_path = diff.path.clone();
+    let diff_count = diffs.len();
+
+    let mut added_lines = 0;
+    let mut deleted_lines = 0;
+    for l in &diff.diff_lines {
+        match l {
+            diff::DiffLine::Added(_) => added_lines += 1,
+            diff::DiffLine::Deleted(_) => deleted_lines += 1,
+            diff::DiffLine::Unchanged(_) => {}
+        }
+    }
+
+    let accept_handler = move |_| {
+        on_accept(0);
+    };
+
+    let reject_handler = move |_| {
+        on_reject(0);
+    };
+
+    let reject_all_handler = move |_| {
+        on_reject_all();
+    };
+
+    let switch_handler = move |_| {
+        on_switch_to_editor();
+    };
+
+    let mut line_elements = Vec::new();
+    for d_line in &diff.diff_lines {
+        match d_line {
+            diff::DiffLine::Deleted(text) => {
+                line_elements.push(
+                    rect()
+                        .width(Size::fill())
+                        .padding(Gaps::new(2., 10., 2., 10.))
+                        .background(Color::from_argb(45, 239, 68, 68))
+                        .child(
+                            label()
+                                .font_family("Jetbrains Mono")
+                                .font_size(12.5)
+                                .text(format!("- {}", text))
+                                .color(Color::from_rgb(248, 113, 113)),
+                        )
+                        .into_element(),
+                );
+            }
+            diff::DiffLine::Added(text) => {
+                line_elements.push(
+                    rect()
+                        .width(Size::fill())
+                        .padding(Gaps::new(2., 10., 2., 10.))
+                        .background(Color::from_argb(45, 34, 197, 94))
+                        .child(
+                            label()
+                                .font_family("Jetbrains Mono")
+                                .font_size(12.5)
+                                .text(format!("+ {}", text))
+                                .color(Color::from_rgb(74, 222, 128)),
+                        )
+                        .into_element(),
+                );
+            }
+            diff::DiffLine::Unchanged(text) => {
+                line_elements.push(
+                    rect()
+                        .width(Size::fill())
+                        .padding(Gaps::new(2., 10., 2., 10.))
+                        .child(
+                            label()
+                                .font_family("Jetbrains Mono")
+                                .font_size(12.5)
+                                .text(format!("  {}", text))
+                                .color(colors.text_secondary),
+                        )
+                        .into_element(),
+                );
+            }
+        }
+    }
+
+    rect()
+        .expanded()
+        .content(Content::Flex)
+        .background(colors.background)
+        .child(
+            // Row 1: File navigation and stats bar
+            rect()
+                .width(Size::fill())
+                .height(Size::px(38.))
+                .padding(Gaps::new(4., 12., 4., 12.))
+                .background(colors.surface_primary)
+                .border(Border::new().fill(colors.border).width(BorderWidth {
+                    top: 0.,
+                    right: 0.,
+                    bottom: 1.,
+                    left: 0.,
+                }))
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .child(
+                    rect()
+                        .expanded()
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .spacing(8.)
+                        .child(
+                            label()
+                                .text("📝 Revue :")
+                                .color(colors.text_primary)
+                                .font_size(13.)
+                                .font_weight(FontWeight::BOLD),
+                        )
+                        .child(
+                            rect()
+                                .padding(Gaps::new(2., 8., 2., 8.))
+                                .background(colors.surface_secondary)
+                                .corner_radius(4.)
+                                .border(Border::new().fill(colors.border).width(1.))
+                                .child(
+                                    label()
+                                        .text(diff_path)
+                                        .color(colors.text_highlight)
+                                        .font_size(12.)
+                                        .font_weight(FontWeight::BOLD),
+                                ),
+                        )
+                        .child(
+                            rect()
+                                .padding(Gaps::new(2., 6., 2., 6.))
+                                .background(Color::from_argb(35, 34, 197, 94))
+                                .corner_radius(4.)
+                                .child(
+                                    label()
+                                        .text(format!("+{}", added_lines))
+                                        .color(Color::from_rgb(74, 222, 128))
+                                        .font_size(12.)
+                                        .font_weight(FontWeight::BOLD),
+                                ),
+                        )
+                        .child(
+                            rect()
+                                .padding(Gaps::new(2., 6., 2., 6.))
+                                .background(Color::from_argb(35, 239, 68, 68))
+                                .corner_radius(4.)
+                                .child(
+                                    label()
+                                        .text(format!("-{}", deleted_lines))
+                                        .color(Color::from_rgb(248, 113, 113))
+                                        .font_size(12.)
+                                        .font_weight(FontWeight::BOLD),
+                                ),
+                        )
+                        .child(if diff_count > 1 {
+                            label()
+                                .text(format!("(1/{} en attente)", diff_count))
+                                .color(colors.text_secondary)
+                                .font_size(12.)
+                                .into_element()
+                        } else {
+                            rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                        }),
+                )
+                .child(
+                    Button::new()
+                        .background(colors.surface_tertiary)
+                        .hover_background(colors.tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(colors.text_primary)
+                        .corner_radius(4.)
+                        .on_press(switch_handler)
+                        .child("← Retour Éditeur"),
+                ),
+        )
+        .child(
+            // Row 2: Dedicated prominent action banner (buttons are on the left, immediately visible)
+            rect()
+                .width(Size::fill())
+                .height(Size::px(48.))
+                .padding(Gaps::new(6., 16., 6., 16.))
+                .background(colors.surface_secondary)
+                .border(Border::new().fill(colors.border).width(BorderWidth {
+                    top: 0.,
+                    right: 0.,
+                    bottom: 1.,
+                    left: 0.,
+                }))
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(12.)
+                .child(
+                    Button::new()
+                        .background(Color::from_rgb(22, 163, 74))
+                        .hover_background(Color::from_rgb(21, 128, 61))
+                        .border_fill(Color::TRANSPARENT)
+                        .color(Color::WHITE)
+                        .corner_radius(6.)
+                        .on_press(accept_handler)
+                        .child("✓ Accepter la modification"),
+                )
+                .child(
+                    Button::new()
+                        .background(Color::from_rgb(220, 38, 38))
+                        .hover_background(Color::from_rgb(185, 28, 28))
+                        .border_fill(Color::TRANSPARENT)
+                        .color(Color::WHITE)
+                        .corner_radius(6.)
+                        .on_press(reject_handler)
+                        .child("✗ Rejeter la modification"),
+                )
+                .child(if diff_count > 1 {
+                    Button::new()
+                        .background(Color::from_rgb(127, 29, 29))
+                        .hover_background(Color::from_rgb(153, 27, 27))
+                        .border_fill(Color::TRANSPARENT)
+                        .color(Color::WHITE)
+                        .corner_radius(6.)
+                        .on_press(reject_all_handler)
+                        .child("✗ Tout rejeter")
+                        .into_element()
+                } else {
+                    rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                })
+                .child(
+                    label()
+                        .text("— Cliquez pour confirmer ou refuser l'écriture")
+                        .color(colors.text_secondary)
+                        .font_size(11.5),
+                ),
+        )
+        .child(
+            rect()
+                .expanded()
+                .padding(8.)
+                .background(colors.surface_secondary)
+                .child(
+                    ScrollView::new().child(
+                        rect().width(Size::fill()).children(line_elements),
+                    ),
+                ),
+        )
+        .child(
+            rect()
+                .width(Size::fill())
+                .height(Size::px(32.))
+                .padding(Gaps::new(4., 16., 4., 16.))
+                .background(colors.surface_primary)
+                .border(Border::new().fill(colors.border).width(BorderWidth {
+                    top: 1.,
+                    right: 0.,
+                    bottom: 0.,
+                    left: 0.,
+                }))
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .child(
+                    label()
+                        .text("💡 Aucun fichier n'est modifié sur votre disque tant que vous ne cliquez pas sur 'Accepter la modification'.")
+                        .color(colors.text_secondary)
+                        .font_size(11.5),
+                ),
+        )
+        .into_element()
+}
+
+/// Helper function to create a clean CodeEditorData without stale AST nodes from previous files.
+fn create_editor_data(content: &str, language: Option<SupportedLanguage>) -> CodeEditorData {
+    let rope = Rope::from_str(content);
+    let editor_lang = language.map(|l| l.editor_language());
+    let mut data = CodeEditorData::new(rope, editor_lang);
+    data.set_theme(EditorSyntaxTheme::dark());
+    data.parse();
+    data.measure(14., "Jetbrains Mono");
+    data
+}
+
 fn app() -> impl IntoElement {
     // Load the external theme (colors) from theme.json and provide it to the
     // whole component tree. This is the app's "stylesheet": the single source
     // of truth for the color palette. `c` is a shorthand for the color sheet.
     let theme = use_provide_theme(theme::load_theme);
     let c = theme.read().colors.clone();
+    let editor_a11y_id = use_a11y();
 
     // Check the API key configuration at startup so the user is informed
     // immediately if it is missing or invalid, rather than failing silently
@@ -319,6 +673,8 @@ fn app() -> impl IntoElement {
     // The set of directories the user has expanded in the file-tree sidebar,
     // keyed by their absolute path.
     let expanded_dirs = use_state(std::collections::HashSet::<std::path::PathBuf>::new);
+    let pending_diffs = use_state(Vec::<diff::PendingDiff>::new);
+    let center_view_mode = use_state(|| CenterViewMode::Editor);
 
     // Whether the settings panel is open.
     let show_settings = use_state(|| false);
@@ -332,14 +688,34 @@ fn app() -> impl IntoElement {
     // Feedback message shown in the settings panel after saving.
     let settings_feedback = use_state(String::new);
 
+    // Automatically fetch models from endpoint at startup if API key is present
+    let mut initial_models_loaded = use_state(|| false);
+    if !*initial_models_loaded.read() {
+        *initial_models_loaded.write() = true;
+        let ep = settings_endpoint_input.read().trim().to_string();
+        let k = settings_key_input.read().trim().to_string();
+        let mut available_models = available_models;
+        let mut models_loading = models_loading;
+        spawn(async move {
+            if !k.is_empty() {
+                *models_loading.write() = true;
+                if let Ok(m) = api::fetch_models(&ep, &k).await {
+                    if !m.is_empty() {
+                        *available_models.write() = m;
+                    }
+                }
+                *models_loading.write() = false;
+            }
+        });
+    }
+
     // The currently selected language. Defaults to Python.
     let current_language = use_state(|| SupportedLanguage::Python);
 
     // Shared editor state, lifted up so the chat and terminal panels can read
     // and write the exact same content that is displayed in the editor.
     let editor = use_state(|| {
-        let rope = Rope::from_str(
-            r#"def fibonacci(n):
+        let code = r#"def fibonacci(n):
     """Return the first n Fibonacci numbers."""
     if n <= 0:
         return []
@@ -354,14 +730,8 @@ fn app() -> impl IntoElement {
 if __name__ == "__main__":
     result = fibonacci(10)
     print("First 10 Fibonacci numbers:", result)
-"#,
-        );
-        let language = SupportedLanguage::Python.editor_language();
-        let mut editor = CodeEditorData::new(rope, language);
-        editor.set_theme(EditorSyntaxTheme::dark());
-        editor.parse();
-        editor.measure(14., "Jetbrains Mono");
-        editor
+"#;
+        create_editor_data(code, Some(SupportedLanguage::Python))
     });
 
     // The file name shown in the editor header. This is shared state so it can
@@ -395,9 +765,9 @@ if __name__ == "__main__":
 
     // Refresh models from API endpoint
     let refresh_models = {
-        let mut available_models = available_models;
-        let mut models_loading = models_loading;
-        let mut settings_feedback = settings_feedback;
+        let available_models = available_models;
+        let models_loading = models_loading;
+        let settings_feedback = settings_feedback;
         let endpoint_val = settings_endpoint_input.read().clone();
         let key_val = settings_key_input.read().clone();
         move |_| {
@@ -462,16 +832,153 @@ if __name__ == "__main__":
         }
     };
 
+    let accept_diff = {
+        let mut pending_diffs = pending_diffs;
+        let mut editor = editor;
+        let mut current_language = current_language;
+        let file_name = file_name;
+        let mut messages = messages;
+        let mut center_view_mode = center_view_mode;
+        move |idx: usize| {
+            let diff_opt = {
+                let mut diffs = pending_diffs.write();
+                if idx < diffs.len() {
+                    Some(diffs.remove(idx))
+                } else if !diffs.is_empty() {
+                    Some(diffs.remove(0))
+                } else {
+                    None
+                }
+            };
+            if let Some(diff) = diff_opt {
+                if let Err(e) = std::fs::write(&diff.path, &diff.new_content) {
+                    messages.write().push(Message {
+                        role: Role::AI,
+                        content: format!("⚠️ Impossible d'écrire le fichier '{}': {}", diff.path, e),
+                    });
+                    return;
+                }
+                myers::log_myers_diff(&diff.path, &diff.old_content, &diff.new_content);
+
+                let current_open = file_name.read().clone();
+                if current_open == diff.path || current_open.ends_with(&diff.path) || diff.path.ends_with(&current_open) {
+                    let ext = std::path::Path::new(&diff.path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let lang = SupportedLanguage::from_extension(ext);
+                    if let Some(l) = lang {
+                        *current_language.write() = l;
+                    }
+                    *editor.write() = create_editor_data(&diff.new_content, lang);
+                }
+
+                messages.write().push(Message {
+                    role: Role::AI,
+                    content: format!("✅ Modifications validées et appliquées à `{}`.", diff.path),
+                });
+            }
+            if pending_diffs.read().is_empty() {
+                *center_view_mode.write() = CenterViewMode::Editor;
+            }
+        }
+    };
+
+    let reject_diff = {
+        let mut pending_diffs = pending_diffs;
+        let mut messages = messages;
+        let mut center_view_mode = center_view_mode;
+        let mut editor = editor;
+        let mut current_language = current_language;
+        let file_name = file_name;
+        move |idx: usize| {
+            let diff_opt = {
+                let mut diffs = pending_diffs.write();
+                if idx < diffs.len() {
+                    Some(diffs.remove(idx))
+                } else if !diffs.is_empty() {
+                    Some(diffs.remove(0))
+                } else {
+                    None
+                }
+            };
+            if let Some(diff) = diff_opt {
+                let current_open = file_name.read().clone();
+                if current_open == diff.path || current_open.ends_with(&diff.path) || diff.path.ends_with(&current_open) {
+                    let ext = std::path::Path::new(&diff.path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let lang = SupportedLanguage::from_extension(ext);
+                    if let Some(l) = lang {
+                        *current_language.write() = l;
+                    }
+                    *editor.write() = create_editor_data(&diff.old_content, lang);
+                }
+
+                messages.write().push(Message {
+                    role: Role::AI,
+                    content: format!("❌ Modification pour `{}` rejetée.", diff.path),
+                });
+            }
+            if pending_diffs.read().is_empty() {
+                *center_view_mode.write() = CenterViewMode::Editor;
+            }
+        }
+    };
+
+    let reject_all_diffs = {
+        let mut pending_diffs = pending_diffs;
+        let mut messages = messages;
+        let mut center_view_mode = center_view_mode;
+        let mut editor = editor;
+        let mut current_language = current_language;
+        let file_name = file_name;
+        move || {
+            let diffs = pending_diffs.write().drain(..).collect::<Vec<_>>();
+            let current_open = file_name.read().clone();
+            for diff in &diffs {
+                if current_open == diff.path || current_open.ends_with(&diff.path) || diff.path.ends_with(&current_open) {
+                    let ext = std::path::Path::new(&diff.path).extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let lang = SupportedLanguage::from_extension(ext);
+                    if let Some(l) = lang {
+                        *current_language.write() = l;
+                    }
+                    *editor.write() = create_editor_data(&diff.old_content, lang);
+                }
+            }
+            let count = diffs.len();
+            messages.write().push(Message {
+                role: Role::AI,
+                content: format!("❌ {} modification(s) en attente annulée(s).", count),
+            });
+            *center_view_mode.write() = CenterViewMode::Editor;
+        }
+    };
+
+    let open_file = {
+        let editor = std::rc::Rc::new(std::cell::RefCell::new(editor));
+        let current_language = std::rc::Rc::new(std::cell::RefCell::new(current_language));
+        let file_name = std::rc::Rc::new(std::cell::RefCell::new(file_name));
+        let center_view_mode = std::rc::Rc::new(std::cell::RefCell::new(center_view_mode));
+        move |path: std::path::PathBuf| {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let lang = SupportedLanguage::from_extension(ext);
+                if let Some(l) = lang {
+                    *current_language.borrow_mut().write() = l;
+                }
+                *editor.borrow_mut().write() = create_editor_data(&content, lang);
+                *file_name.borrow_mut().write() = path.to_string_lossy().to_string();
+                *center_view_mode.borrow_mut().write() = CenterViewMode::Editor;
+            }
+        }
+    };
+
     // Shared chat send logic. Both the Send button and the Enter key route
-    // through this same code path so they behave identically. It takes the raw
-    // message text, ignores empty/whitespace-only messages, and dispatches it
-    // (clear editor locally, or call the AI).
+    // through this same code path so they behave identically.
     let send_text = {
         let mut messages = messages;
         let mut input_value = input_value;
         let mut editor = editor;
         let mut current_language = current_language;
         let mut file_name = file_name;
+        let pending_diffs = pending_diffs;
+        let center_view_mode = center_view_mode;
         move |user_message: String| {
             if !should_send_message(&user_message) {
                 return;
@@ -486,35 +993,15 @@ if __name__ == "__main__":
             // Detect the language the user is asking about.
             let detected_language = SupportedLanguage::detect(&user_message);
 
-            // Check if the user wants to clear the editor. This is handled
-            // locally (no AI call needed).
+            // Check if the user wants to clear the editor.
             let wants_clear_editor = flow::wants_clear_editor(&user_message);
-
-            // Check if user wants to generate code. This is intentionally broad:
-            // it triggers when the user asks to write/generate/create/make code,
-            // a function, a program, a script, etc.
             let wants_code = flow::wants_code(&user_message);
 
             // Clear input
             *input_value.write() = String::new();
 
-            // Handle "clear editor" locally without calling the AI.
             if wants_clear_editor {
-                // Re-setting the language invalidates the cached tree-sitter
-                // tree. This is essential: if we cleared the rope while the old
-                // tree (built from the previous content) was still cached, the
-                // next parse would try to read bytes that no longer exist and
-                // panic. We also seed the rope with a single newline so it is
-                // never empty, which keeps the highlighter happy.
-                editor
-                    .write()
-                    .set_language(current_language.read().editor_language());
-                editor.write().set("\n");
-                editor.write().set_selection((0, 0));
-                editor.write().parse();
-                editor.write().measure(14., "Jetbrains Mono");
-                // The editor is now empty, so the title falls back to the
-                // conventional `main.<ext>` for the current language.
+                *editor.write() = create_editor_data("\n", Some(*current_language.read()));
                 *file_name.write() = flow::derive_file_name("\n", *current_language.read());
                 messages.write().push(Message {
                     role: Role::AI,
@@ -523,167 +1010,128 @@ if __name__ == "__main__":
                 return;
             }
 
-            // Add AI response using rig-core with the Albert endpoint
-            spawn(async move {
-                // Load the Albert API key from env var or config file.
-                let api_key_config = config::ApiKeyConfig::load();
+            let history_snapshot = messages.read().clone();
+            let mut pending_diffs_stream = pending_diffs;
+            let mut center_view_mode_stream = center_view_mode;
+            let mut messages_stream = messages;
 
-                // If no key is configured, inform the user instead of silently
-                // failing on the first request.
+            spawn(async move {
+                let api_key_config = config::ApiKeyConfig::load();
                 if let Err(msg) = api_key_config.validate() {
-                    messages.write().push(Message {
+                    messages_stream.write().push(Message {
                         role: Role::AI,
-                        content: format!(
-                            "⚠️ {}\n\nPlease configure your API key and try again.",
-                            msg
-                        ),
+                        content: format!("⚠️ {}\n\nPlease configure your API key and try again.", msg),
                     });
                     return;
                 }
 
-                // Build an OpenAI-compatible Completions client pointed at the configured endpoint
                 let endpoint_to_use = api_key_config.endpoint.clone().unwrap_or_else(|| ALBERT_ENDPOINT.to_string());
                 let model_to_use = api_key_config.model.clone().unwrap_or_else(|| ALBERT_MODEL.to_string());
-                let client = openai::CompletionsClient::builder()
-                    .api_key(&api_key_config.key)
-                    .base_url(&endpoint_to_use)
-                    .build();
 
-              match client {
-                    Ok(_) => {
-                        let npx_cmd = if cfg!(target_os = "windows") {
-                            "npx.cmd"
-                        } else {
-                            "npx"
-                        };
+                // 1. Préparation de la bulle de chat pour le streaming
+                messages_stream.write().push(Message {
+                    role: Role::AI,
+                    content: String::new(),
+                });
+                let ai_msg_idx = messages_stream.read().len() - 1;
 
-                        // 1. Démarrage du serveur MCP stdio
-                        let mcp = match mcp::McpClient::spawn(npx_cmd, &["-y", "@modelcontextprotocol/server-filesystem", "."]).await {
-                            Ok(client) => client,
-                            Err(e) => {
-                                messages.write().push(Message {
-                                    role: Role::AI,
-                                    content: format!("⚠️ Erreur au démarrage du serveur MCP: {}", e),
-                                });
-                                return;
-                            }
-                        };
+                // 2. Exécution avec outils natifs, streaming, et diff callback
+                let endpoint = endpoint_to_use;
+                let api_key = api_key_config.key.clone();
+                let model = model_to_use;
+                let user_msg = user_message.clone();
 
-                        // 2. Découverte de TOUS les outils
-                        match mcp.list_tools().await {
-                            Ok(t) => {
-                                println!("[MCP] {} outils enregistrés pour le modèle :", t.len());
-                                for tool in &t {
-                                    println!("  -> {}", tool.name);
+                let result = api::prompt_with_retry(|| {
+                    let endpoint = endpoint.clone();
+                    let api_key = api_key.clone();
+                    let model = model.clone();
+                    let user_msg = user_msg.clone();
+                    let history = history_snapshot.clone();
+                    let mut messages_stream = messages_stream;
+                    let mut pending_diffs_stream = pending_diffs_stream;
+                    let mut center_view_mode_stream = center_view_mode_stream;
+
+                    async move {
+                        println!("[DEBUG] Prompt envoyé : {}", user_msg);
+                        api::run_agent_loop_stream(
+                            &endpoint,
+                            &api_key,
+                            &model,
+                            "Tu es un assistant de programmation expert. Tu as accès aux outils natifs du projet (read_file, write_file, edit_file, list_directory, search_files, run_command). \
+                             IMPORTANT : Ne liste et n'explore JAMAIS les répertoires `target/`, `.git/` ou `node_modules/`. \
+                             Privilégie `list_directory` sur `src/` ou à la racine. \
+                             Lorsque tu proposes d'éditer ou créer un fichier, un diff est automatiquement généré pour validation utilisateur avant écriture sur disque. \
+                             Sois précis, concis et efficace.",
+                            &history,
+                            &user_msg,
+                            |chunk| {
+                                if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
+                                    msg.content.push_str(chunk);
                                 }
-                            }
-                            Err(e) => {
-                                messages.write().push(Message {
-                                    role: Role::AI,
-                                    content: format!("⚠️ Erreur lors de la récupération des outils MCP: {}", e),
-                                });
-                                return;
-                            }
-                        };
+                            },
+                            |diff| {
+                                pending_diffs_stream.write().push(diff);
+                                *center_view_mode_stream.write() = CenterViewMode::Diff;
+                            },
+                        )
+                        .await
+                    }
+                })
+                .await;
 
-                        // 3. Préparation de la bulle de chat pour le streaming
-                        messages.write().push(Message {
-                            role: Role::AI,
-                            content: String::new(),
-                        });
-                        let ai_msg_idx = messages.read().len() - 1;
-
-                        // 4. Exécution de la boucle agentique avec streaming
-                        let endpoint = endpoint_to_use;
-                        let api_key = api_key_config.key.clone();
-                        let model = model_to_use;
-                        let user_msg = user_message.clone();
-                        let mcp_clone = mcp.clone();
-                        let mut messages_stream = messages;
-
-                        let result = api::prompt_with_retry(|| {
-                            let endpoint = endpoint.clone();
-                            let api_key = api_key.clone();
-                            let model = model.clone();
-                            let user_msg = user_msg.clone();
-                            let mcp_clone = mcp_clone.clone();
-                            let mut messages_stream = messages_stream;
-
-                            async move {
-                                println!("[DEBUG] Prompt envoyé : {}", user_msg);
-                                api::run_agent_loop_stream(
-                                    &endpoint,
-                                    &api_key,
-                                    &model,
-                                   "Tu es un assistant de programmation expert. Tu as accès aux outils MCP. \
-                                IMPORTANT : Ne liste et n'explore JAMAIS les répertoires `target/`, `.git/` ou `node_modules/`. \
-                                Privilégie `list_directory` sur `src/` ou à la racine plutôt qu'un `directory_tree` global. 
-                                Si tu modifies un fichier, dès que t'as finis tu arrêtes de l'éditer et tu finis de répondre à l'utilisateur. Ne fais pas de modifications inutiles. Ne réponds jamais par 'Je ne peux pas faire ça' ou 'Je ne peux pas accéder à ce fichier'. \
-                                ",
-                                    &user_msg,
-                                    &mcp_clone,
-                                    |chunk| {
-                                        if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
-                                            msg.content.push_str(chunk);
-                                        }
-                                    },
-                                )
-                                .await
-                            }
-                        })
-                        .await;
-
-                      match result {
-                            Ok(response) => {
-                                let final_response = match flow::decide_editor_action(
-                                    &response,
-                                    wants_code,
-                                    detected_language,
-                                ) {
-                                    flow::EditorAction::Insert { language, code } => {
-                                        let target_file = flow::find_target_file(&user_message, &file_name.read());
-                                        let display_name = target_file.clone().unwrap_or_else(|| file_name.read().clone());
-                                        let old_code = if let Some(ref path) = target_file {
-                                            std::fs::read_to_string(path).unwrap_or_else(|_| editor.read().rope.to_string())
-                                        } else {
-                                            editor.read().rope.to_string()
+                match result {
+                    Ok(response) => {
+                        let final_response = if !pending_diffs_stream.read().is_empty() {
+                            // An agent tool (write_file/edit_file) already generated a pending diff!
+                            // Keep the response text and avoid generating duplicate diffs.
+                            response
+                        } else {
+                            match flow::decide_editor_action(
+                                &response,
+                                wants_code,
+                                detected_language,
+                            ) {
+                                flow::EditorAction::Insert { language, code } => {
+                                    let target_file = flow::find_target_file(&user_message, &file_name.read());
+                                    let display_name = target_file.clone().unwrap_or_else(|| file_name.read().clone());
+                                    if let Some(ref path) = target_file {
+                                        let old_code = std::fs::read_to_string(path).unwrap_or_default();
+                                        let diff_lines = diff::computed_diff(&old_code, &code);
+                                        let pd = diff::PendingDiff {
+                                            id: format!(
+                                                "diff_{}",
+                                                std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_millis()
+                                            ),
+                                            path: path.clone(),
+                                            old_content: old_code,
+                                            new_content: code.clone(),
+                                            diff_lines,
                                         };
-
-                                        myers::log_myers_diff(&display_name, &old_code, &code);
-
-                                        if let Some(ref path) = target_file {
-                                            let _ = std::fs::write(path, &code);
-                                        }
-
+                                        pending_diffs_stream.write().push(pd);
+                                        *center_view_mode_stream.write() = CenterViewMode::Diff;
+                                        flow::insertion_confirmation(language)
+                                    } else {
                                         *current_language.write() = language;
-                                        editor.write().set_language(language.editor_language());
-                                        editor.write().set(&code);
-                                        editor.write().set_selection((0, 0));
-                                        editor.write().parse();
-                                        editor.write().measure(14., "Jetbrains Mono");
+                                        *editor.write() = create_editor_data(&code, Some(language));
                                         *file_name.write() = display_name;
                                         flow::insertion_confirmation(language)
                                     }
-                                    flow::EditorAction::ShowResponse => response,
-                                };
+                                }
+                                flow::EditorAction::ShowResponse => response,
+                            }
+                        };
 
-                                if let Some(msg) = messages.write().get_mut(ai_msg_idx) {
-                                    msg.content = final_response;
-                                }
-                            }
-                            Err((_category, message)) => {
-                                // Affiche l'erreur détaillée directement dans la bulle de chat Freya
-                                if let Some(msg) = messages.write().get_mut(ai_msg_idx) {
-                                    msg.content = format!("⚠️ **Erreur lors de l'appel :**\n\n{}", message);
-                                }
-                            }
+                        if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
+                            msg.content = final_response;
                         }
                     }
-                    Err(e) => {
-                        messages.write().push(Message {
-                            role: Role::AI,
-                            content: format!("Failed to build client: {}", e),
-                        });
+                    Err((_category, message)) => {
+                        if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
+                            msg.content = format!("⚠️ **Erreur lors de l'appel :**\n\n{}", message);
+                        }
                     }
                 }
             });
@@ -750,6 +1198,29 @@ if __name__ == "__main__":
         }
     };
 
+    // Save the current editor buffer to disk.
+    let save_file = {
+        let mut messages = messages;
+        let file_name = file_name;
+        let editor = editor;
+        move |_| {
+            let path_str = file_name.read().clone();
+            let code_content = editor.read().rope.to_string();
+            let path = std::path::Path::new(&path_str);
+            if let Err(e) = std::fs::write(path, &code_content) {
+                messages.write().push(Message {
+                    role: Role::AI,
+                    content: format!("⚠️ Erreur lors de la sauvegarde de `{}` : {}", path_str, e),
+                });
+            } else {
+                messages.write().push(Message {
+                    role: Role::AI,
+                    content: format!("💾 Fichier `{}` sauvegardé sur le disque.", path_str),
+                });
+            }
+        }
+    };
+
     // Chat area
     let chat_area = rect().width(Size::fill()).height(Size::flex(1.)).child(
         ScrollView::new().child(rect().width(Size::fill()).padding(16.).children(
@@ -793,6 +1264,11 @@ if __name__ == "__main__":
                                     .span(msg.content.clone())
                                     .color(text_color)
                                     .into_element()
+                            } else if msg.content.trim().is_empty() {
+                                label()
+                                    .text("⏳ En attente de l'assistant...")
+                                    .color(c.text_placeholder)
+                                    .into_element()
                             } else {
                                 MarkdownViewer::new(msg.content.clone())
                                     .color(text_color)
@@ -803,15 +1279,106 @@ if __name__ == "__main__":
         )),
     );
 
-    // Input area
+    let project_name = current_dir
+        .read()
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "rustagent".to_string());
+    let current_file_display = {
+        let f = file_name.read().clone();
+        std::path::Path::new(&f)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or(f)
+    };
+    let active_model = settings_model_input.read().clone();
+
+    let is_models_loading = *models_loading.read();
+    let loaded_models = available_models.read().clone();
+
+    let mut model_options: Vec<String> = if !loaded_models.is_empty() {
+        loaded_models
+    } else {
+        vec![
+            "deepseek-v4-flash".to_string(),
+            "deepseek-v3".to_string(),
+            "openweight-medium".to_string(),
+            "albert-light".to_string(),
+            "qwen-2.5-coder".to_string(),
+        ]
+    };
+    if !active_model.is_empty() && !model_options.contains(&active_model) {
+        model_options.insert(0, active_model.clone());
+    }
+
+    let model_items = model_options.into_iter().map({
+        let active_model = active_model.clone();
+        let mut settings_model_input = settings_model_input;
+        move |m| {
+            let is_selected = m == active_model;
+            let m_choice = m.clone();
+            MenuItem::new()
+                .selected(is_selected)
+                .on_press(move |_| {
+                    *settings_model_input.write() = m_choice.clone();
+                    let mut cfg = config::ApiKeyConfig::load();
+                    cfg.model = Some(m_choice.clone());
+                    let _ = cfg.save();
+                })
+                .child(m)
+        }
+    });
+
+    let model_select = Select::new()
+        .selected_item(format!("🤖 {}", if active_model.is_empty() { "Choisir modèle" } else { &active_model }))
+        .children(model_items);
+
+    let refresh_models_button = Button::new()
+        .background(c.surface_tertiary)
+        .hover_background(c.tertiary)
+        .border_fill(Color::TRANSPARENT)
+        .color(c.text_secondary)
+        .on_press({
+            let ep_val = settings_endpoint_input.read().clone();
+            let key_val = settings_key_input.read().clone();
+            let available_models = available_models;
+            let models_loading = models_loading;
+            move |_| {
+                let ep = ep_val.trim().to_string();
+                let k = key_val.trim().to_string();
+                let mut available_models = available_models;
+                let mut models_loading = models_loading;
+                *models_loading.write() = true;
+                spawn(async move {
+                    if let Ok(m) = api::fetch_models(&ep, &k).await {
+                        *available_models.write() = m;
+                    }
+                    *models_loading.write() = false;
+                });
+            }
+        })
+        .child(if is_models_loading { "⟳ ..." } else { "⟳" });
+
+    // Input area with text input and model selector bar
     let input_area = rect()
         .width(Size::fill())
-        .height(Size::px(60.))
-        .padding(12.)
+        .height(Size::px(96.))
+        .background(c.surface_primary)
+        .border(Border::new().fill(c.border).width(BorderWidth {
+            top: 1.,
+            right: 0.,
+            bottom: 0.,
+            left: 0.,
+        }))
+        .padding(Gaps::new(8., 12., 8., 12.))
+        .spacing(8.)
+        .content(Content::Flex)
         .child(
+            // Row 1: Chat input and send button
             rect()
+                .width(Size::fill())
+                .height(Size::px(38.))
                 .horizontal()
-                .expanded()
                 .cross_align(Alignment::Center)
                 .spacing(8.)
                 .content(Content::Flex)
@@ -821,7 +1388,7 @@ if __name__ == "__main__":
                         .focus_background(c.tertiary)
                         .border_fill(Color::TRANSPARENT)
                         .color(c.text_secondary)
-                        .placeholder("Type your message...")
+                        .placeholder("Poser une question ou demander une action...")
                         .width(Size::flex(1.))
                         .on_submit(on_submit),
                 )
@@ -832,7 +1399,32 @@ if __name__ == "__main__":
                         .border_fill(Color::TRANSPARENT)
                         .color(c.text_secondary)
                         .on_press(send_message)
-                        .child("Send"),
+                        .child("Envoyer"),
+                ),
+        )
+        .child(
+            // Row 2: Model select dropdown, refresh button and context label
+            rect()
+                .width(Size::fill())
+                .height(Size::px(32.))
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(8.)
+                .content(Content::Flex)
+                .child(model_select)
+                .child(refresh_models_button)
+                .child(
+                    rect()
+                        .width(Size::flex(1.))
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .main_align(Alignment::End)
+                        .child(
+                            label()
+                                .text(format!("📁 {}  ·  📄 {}", project_name, current_file_display))
+                                .color(c.text_placeholder)
+                                .font_size(11.),
+                        ),
                 ),
         );
 
@@ -875,8 +1467,8 @@ if __name__ == "__main__":
                 .color(c.text_secondary)
                 .on_press({
                     let mut show_settings = show_settings;
-                    let mut available_models = available_models;
-                    let mut models_loading = models_loading;
+                    let available_models = available_models;
+                    let models_loading = models_loading;
                     let ep_val = settings_endpoint_input.read().clone();
                     let key_val = settings_key_input.read().clone();
                     move |_| {
@@ -915,18 +1507,18 @@ if __name__ == "__main__":
                 .color(c.text_secondary)
                 .on_press(reset_terminal)
                 .child("Reset Terminal"),
-        )
-        .child(
-            Button::new()
-                .background(c.surface_tertiary)
-                .hover_background(c.tertiary)
-                .border_fill(Color::TRANSPARENT)
-                .color(c.text_secondary)
-                .on_press(execute_code)
-                .child("Execute Code"),
         );
 
-    // Execute button for code
+    // Save button for code editor header
+    let save_button = Button::new()
+        .background(c.surface_tertiary)
+        .hover_background(c.tertiary)
+        .border_fill(Color::TRANSPARENT)
+        .color(c.text_secondary)
+        .on_press(save_file)
+        .child("💾 Sauvegarder");
+
+    // Execute button for code editor header
     let execute_button = Button::new()
         .background(c.surface_tertiary)
         .hover_background(c.tertiary)
@@ -935,99 +1527,109 @@ if __name__ == "__main__":
         .on_press(execute_code)
         .child("Execute Code");
 
-    // A web image stretched across both panels as a decorative overlay. It is
-    // wrapped in a non-interactive rect so it never blocks pointer events from
-    // reaching the chat or terminal underneath, and it is placed on the overlay
-    // layer so it always renders on top of the panels.
-    let overlay = rect()
-        .layer(Layer::Overlay)
-        .position(Position::new_absolute().top(0.).left(0.))
-        .width(Size::fill())
-        .height(Size::fill())
-        .interactive(Interactive::No)
-        .child(
-            ImageViewer::new(
-                "https://images.unsplash.com/photo-1518770660439-4636190af475?w=1200&h=700&fit=crop",
-            )
-            .decode_mode(DecodeMode::Custom(Size2D::new(1200., 700.)))
-            .aspect_ratio(AspectRatio::None)
-            .image_cover(ImageCover::Fill)
-            .width(Size::fill())
-            .height(Size::fill())
-            .opacity(0.35),
-        );
-
     let show_settings_val = *show_settings.read();
 
-    rect()
-        .expanded()
-        .background(c.background)
-        .content(Content::Flex)
-        .child(toolbar)
-        .child(if show_settings_val {
-            settings_page_view(
-                c.clone(),
-                settings_key_input.into(),
-                settings_model_input.into(),
-                settings_endpoint_input.into(),
-                available_models.into(),
-                models_loading.into(),
-                settings_feedback.into(),
-                refresh_models,
-                save_api_key,
-                close_settings,
-            )
-            .into_element()
-        } else {
-            rect()
-                .expanded()
-                .child(
-                    ResizableContainer::new()
-                        .direction(Direction::Horizontal)
-                        .panel(
-                            ResizablePanel::new(PanelSize::percent(20.)).child(
-                                file_tree_panel(current_dir.into(), expanded_dirs.into()),
-                            ),
-                        )
-                        .panel(
-                            ResizablePanel::new(PanelSize::percent(30.)).child(
-                                rect()
-                                    .expanded()
-                                    .content(Content::Flex)
-                                    .child(chat_panel)
-                                    .child(
-                                        rect()
-                                            .width(Size::fill())
-                                            .height(Size::px(40.))
-                                            .padding(8.)
-                                            .child(execute_button),
-                                    ),
-                            ),
-                        )
-                        .panel(
-                            ResizablePanel::new(PanelSize::percent(50.)).child(
-                                ResizableContainer::new()
-                                    .direction(Direction::Vertical)
-                                    .panel(ResizablePanel::new(PanelSize::percent(50.)).child(
-                                        code_editor_panel(editor.into(), file_name.read().clone()),
-                                    ))
-                                    .panel(
-                                        ResizablePanel::new(PanelSize::percent(50.)).child(
-                                            terminal_panel(
-                                                terminal_handle.into_writable(),
-                                                current_dir.into_writable(),
-                                            ),
-                                        ),
-                                    ),
+    let is_diff_view = *center_view_mode.read() == CenterViewMode::Diff && !pending_diffs.read().is_empty();
+    let center_top_panel = if is_diff_view {
+        diff_viewer_panel(
+            pending_diffs.into(),
+            accept_diff,
+            reject_diff,
+            reject_all_diffs,
+            {
+                let mut center_view_mode = center_view_mode.clone();
+                move || {
+                    *center_view_mode.write() = CenterViewMode::Editor;
+                }
+            },
+            c.clone(),
+        )
+        .into_element()
+    } else {
+        code_editor_panel(
+            editor.into(),
+            file_name.read().clone(),
+            pending_diffs.read().len(),
+            {
+                let mut center_view_mode = center_view_mode.clone();
+                move || {
+                    *center_view_mode.write() = CenterViewMode::Diff;
+                }
+            },
+            save_button,
+            execute_button,
+            editor_a11y_id,
+            c.clone(),
+        )
+        .into_element()
+    };
+
+    let main_workspace = ResizableContainer::new()
+        .direction(Direction::Horizontal)
+        .panel(
+            ResizablePanel::new(PanelSize::percent(18.)).child(
+                file_tree_panel(
+                    current_dir.into(),
+                    expanded_dirs.into(),
+                    c.clone(),
+                    open_file.clone(),
+                ),
+            ),
+        )
+        .panel(
+            ResizablePanel::new(PanelSize::percent(52.)).child(
+                ResizableContainer::new()
+                    .direction(Direction::Vertical)
+                    .panel(ResizablePanel::new(PanelSize::percent(55.)).child(center_top_panel))
+                    .panel(
+                        ResizablePanel::new(PanelSize::percent(45.)).child(
+                            terminal_panel(
+                                terminal_handle.into_writable(),
+                                current_dir.into_writable(),
                             ),
                         ),
-                )
-                .child(overlay)
-                .into_element()
-        })
+                    ),
+            ),
+        )
+        .panel(
+            ResizablePanel::new(PanelSize::percent(30.)).child(
+                rect()
+                    .expanded()
+                    .content(Content::Flex)
+                    .child(chat_panel),
+            ),
+        );
+
+    if show_settings_val {
+        rect()
+            .expanded()
+            .background(c.background)
+            .content(Content::Flex)
+            .child(
+                settings_page_view(
+                    c.clone(),
+                    settings_key_input.into(),
+                    settings_model_input.into(),
+                    settings_endpoint_input.into(),
+                    available_models.into(),
+                    models_loading.into(),
+                    settings_feedback.into(),
+                    refresh_models,
+                    save_api_key,
+                    close_settings,
+                ),
+            )
+    } else {
+        rect()
+            .expanded()
+            .background(c.background)
+            .content(Content::Flex)
+            .child(toolbar)
+            .child(rect().expanded().child(main_workspace))
+    }
 }
 
-/// A dedicated, accessible settings view with a clean centered card layout.
+/// A dedicated, accessible full-page settings view.
 fn settings_page_view<H0, H1, H2>(
     c: ColorsSheet,
     key_input: Writable<String>,
@@ -1042,232 +1644,306 @@ fn settings_page_view<H0, H1, H2>(
 ) -> impl IntoElement
 where
     H0: Into<EventHandler<Event<PressEventData>>>,
-    H1: Into<EventHandler<Event<PressEventData>>>,
-    H2: Into<EventHandler<Event<PressEventData>>>,
+    H1: Into<EventHandler<Event<PressEventData>>> + Clone,
+    H2: Into<EventHandler<Event<PressEventData>>> + Clone,
 {
     let models = available_models.read().clone();
     let is_loading = *models_loading.read();
     let current_selected = model_input.read().clone();
-    let modal_bg = Color::from_rgb(28, 29, 34);
 
     rect()
         .expanded()
         .background(c.background)
         .content(Content::Flex)
-        .center()
         .child(
+            // Top Navigation Bar
             rect()
-                .width(Size::px(640.))
-                .padding(28.)
-                .background(modal_bg)
-                .corner_radius(12.)
-                .border(Border::new().fill(Color::from_rgb(52, 54, 64)).width(BorderWidth {
-                    top: 1.,
-                    right: 1.,
+                .width(Size::fill())
+                .height(Size::px(48.))
+                .padding(Gaps::new(6., 20., 6., 20.))
+                .background(c.surface_primary)
+                .border(Border::new().fill(c.border).width(BorderWidth {
+                    top: 0.,
+                    right: 0.,
                     bottom: 1.,
-                    left: 1.,
+                    left: 0.,
                 }))
-                .shadow(Shadow::new().x(0.).y(10.).blur(32.).color(Color::from_argb(180, 0, 0, 0)))
+                .horizontal()
+                .cross_align(Alignment::Center)
                 .content(Content::Flex)
                 .spacing(14.)
                 .child(
+                    Button::new()
+                        .background(c.surface_tertiary)
+                        .hover_background(c.tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_primary)
+                        .on_press(on_close.clone())
+                        .child("← Retour au workspace"),
+                )
+                .child(
                     rect()
-                        .width(Size::fill())
-                        .content(Content::Flex)
+                        .width(Size::flex(1.))
                         .horizontal()
                         .cross_align(Alignment::Center)
                         .child(
-                            rect()
-                                .width(Size::flex(1.))
-                                .content(Content::Flex)
-                                .spacing(2.)
-                                .child(
-                                    label()
-                                        .text("Configuration IA & Modèles")
-                                        .color(c.text_primary)
-                                        .font_size(18.)
-                                        .font_weight(FontWeight::BOLD),
-                                )
-                                .child(
-                                    label()
-                                        .text("Paramétrez vos clés d'API et vos modèles.")
-                                        .color(c.text_secondary)
-                                        .font_size(12.),
-                                ),
-                        )
-                        .child(
-                            Button::new()
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(Color::TRANSPARENT)
+                            label()
+                                .text("⚙ Paramètres & Configuration IA")
                                 .color(c.text_primary)
-                                .on_press(on_close)
-                                .child("✕ Fermer"),
+                                .font_size(15.)
+                                .font_weight(FontWeight::BOLD),
                         ),
                 )
                 .child(
-                    label()
-                        .text("Clé API")
-                        .color(c.text_secondary)
-                        .font_size(13.)
-                        .font_weight(FontWeight::BOLD),
-                )
-                .child(
-                    Input::new(key_input)
-                        .mode(InputMode::Hidden('•'))
-                        .background(c.surface_secondary)
-                        .focus_background(c.surface_tertiary)
+                    Button::new()
+                        .background(Color::from_rgb(22, 163, 74))
+                        .hover_background(Color::from_rgb(21, 128, 61))
                         .border_fill(Color::TRANSPARENT)
-                        .color(c.text_inverse)
-                        .placeholder("sk-...")
-                        .width(Size::fill()),
-                )
+                        .color(Color::WHITE)
+                        .on_press(on_save.clone())
+                        .child("💾 Enregistrer"),
+                ),
+        )
+        .child(
+            // Full-Page Scrollable Content Body
+            rect()
+                .expanded()
+                .content(Content::Flex)
                 .child(
-                    label()
-                        .text("URL Endpoint API")
-                        .color(c.text_secondary)
-                        .font_size(13.)
-                        .font_weight(FontWeight::BOLD),
-                )
-                .child(
-                    Input::new(endpoint_input)
-                        .background(c.surface_secondary)
-                        .focus_background(c.surface_tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_inverse)
-                        .placeholder("https://albert.api.etalab.gouv.fr/v1")
-                        .width(Size::fill()),
-                )
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .content(Content::Flex)
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .child(
-                            rect()
-                                .width(Size::flex(1.))
-                                .child(
-                                    label()
-                                        .text("Modèle sélectionné")
-                                        .color(c.text_secondary)
-                                        .font_size(13.)
-                                        .font_weight(FontWeight::BOLD),
-                                ),
-                        )
-                        .child(
-                            Button::new()
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(Color::TRANSPARENT)
-                                .color(c.text_inverse)
-                                .on_press(on_refresh_models)
-                                .child(if is_loading { "Chargement..." } else { "⟳ Rafraîchir" }),
-                        ),
-                )
-                .child(
-                    Input::new(model_input.clone())
-                        .background(c.surface_secondary)
-                        .focus_background(c.surface_tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_inverse)
-                        .placeholder("deepseek-v4-flash")
-                        .width(Size::fill()),
-                )
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .height(Size::px(150.))
-                        .background(c.surface_secondary)
-                        .corner_radius(6.)
-                        .padding(6.)
-                        .child(if models.is_empty() {
-                            rect()
-                                .width(Size::fill())
-                                .height(Size::fill())
-                                .center()
-                                .child(
-                                    label()
-                                        .text(if is_loading { "Récupération des modèles en cours..." } else { "Aucun modèle chargé. Cliquez sur 'Rafraîchir modèles' ci-dessus." })
-                                        .color(c.text_placeholder)
-                                        .font_size(12.),
-                                )
-                                .into_element()
-                        } else {
-                            ScrollView::new().child(
+                    ScrollView::new().child(
+                        rect()
+                            .width(Size::fill())
+                            .padding(Gaps::new(24., 32., 24., 32.))
+                            .spacing(16.)
+                            .content(Content::Flex)
+                            .child(
+                                // Card 1: API Key
                                 rect()
                                     .width(Size::fill())
-                                    .spacing(4.)
-                                    .children(models.into_iter().map({
-                                        let model_input = model_input.clone();
-                                        let c = c.clone();
-                                        move |m| {
-                                            let m_clone = m.clone();
-                                            let is_active = m == current_selected;
-                                            let bg = if is_active {
-                                                c.surface_tertiary
-                                            } else {
-                                                Color::TRANSPARENT
-                                            };
-                                            let mut model_input_press = model_input.clone();
-                                            let m_selected = m.clone();
-                                            rect()
-                                                .width(Size::fill())
-                                                .padding(6.)
-                                                .background(bg)
-                                                .corner_radius(4.)
-                                                .on_press(move |_| {
-                                                    *model_input_press.write() = m_selected.clone();
-                                                })
-                                                .child(
-                                                    label()
-                                                        .text(m_clone)
-                                                        .color(if is_active { c.text_primary } else { c.text_secondary })
-                                                        .font_size(12.),
-                                                )
-                                        }
-                                    })),
+                                    .padding(18.)
+                                    .background(c.surface_primary)
+                                    .corner_radius(8.)
+                                    .border(Border::new().fill(c.border).width(1.))
+                                    .spacing(8.)
+                                    .child(
+                                        label()
+                                            .text("Clé API (Albert / OpenAI)")
+                                            .color(c.text_primary)
+                                            .font_size(14.)
+                                            .font_weight(FontWeight::BOLD),
+                                    )
+                                    .child(
+                                        label()
+                                            .text("Votre clé est masquée pour la sécurité et conservée dans la configuration locale.")
+                                            .color(c.text_secondary)
+                                            .font_size(12.),
+                                    )
+                                    .child(
+                                        Input::new(key_input)
+                                            .mode(InputMode::Hidden('•'))
+                                            .background(c.surface_secondary)
+                                            .focus_background(c.surface_tertiary)
+                                            .border_fill(Color::TRANSPARENT)
+                                            .color(c.text_inverse)
+                                            .placeholder("sk-...")
+                                            .width(Size::fill()),
+                                    ),
                             )
-                            .into_element()
-                        }),
-                )
-                .child(
-                    label()
-                        .text(format!(
-                            "Configuration enregistrée dans : {}",
-                            config::ApiKeyConfig::config_file_path().display()
-                        ))
-                        .color(c.text_placeholder)
-                        .font_size(11.),
-                )
-                .child(if !feedback.read().is_empty() {
-                    label()
-                        .text(feedback.read().clone())
-                        .color(c.warning)
-                        .font_size(12.)
-                        .into_element()
-                } else {
-                    rect()
-                        .width(Size::px(0.))
-                        .height(Size::px(0.))
-                        .into_element()
-                })
-                .child(
-                    rect()
-                        .width(Size::fill())
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .spacing(10.)
-                        .child(
-                            Button::new()
-                                .width(Size::px(130.))
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(Color::TRANSPARENT)
-                                .color(c.text_inverse)
-                                .on_press(on_save)
-                                .child("Enregistrer"),
-                        ),
+                            .child(
+                                // Card 2: Endpoint URL
+                                rect()
+                                    .width(Size::fill())
+                                    .padding(18.)
+                                    .background(c.surface_primary)
+                                    .corner_radius(8.)
+                                    .border(Border::new().fill(c.border).width(1.))
+                                    .spacing(8.)
+                                    .child(
+                                        label()
+                                            .text("URL Endpoint API")
+                                            .color(c.text_primary)
+                                            .font_size(14.)
+                                            .font_weight(FontWeight::BOLD),
+                                    )
+                                    .child(
+                                        label()
+                                            .text("Adresse de base du service compatible OpenAI /v1.")
+                                            .color(c.text_secondary)
+                                            .font_size(12.),
+                                    )
+                                    .child(
+                                        Input::new(endpoint_input)
+                                            .background(c.surface_secondary)
+                                            .focus_background(c.surface_tertiary)
+                                            .border_fill(Color::TRANSPARENT)
+                                            .color(c.text_inverse)
+                                            .placeholder("https://albert.api.etalab.gouv.fr/v1")
+                                            .width(Size::fill()),
+                                    ),
+                            )
+                            .child(
+                                // Card 3: Models selection
+                                rect()
+                                    .width(Size::fill())
+                                    .padding(18.)
+                                    .background(c.surface_primary)
+                                    .corner_radius(8.)
+                                    .border(Border::new().fill(c.border).width(1.))
+                                    .spacing(10.)
+                                    .content(Content::Flex)
+                                    .child(
+                                        rect()
+                                            .width(Size::fill())
+                                            .horizontal()
+                                            .cross_align(Alignment::Center)
+                                            .child(
+                                                rect()
+                                                    .width(Size::flex(1.))
+                                                    .spacing(2.)
+                                                    .child(
+                                                        label()
+                                                            .text("Modèle par défaut & Modèles de l'endpoint")
+                                                            .color(c.text_primary)
+                                                            .font_size(14.)
+                                                            .font_weight(FontWeight::BOLD),
+                                                    )
+                                                    .child(
+                                                        label()
+                                                            .text("Sélectionnez un modèle ci-dessous ou saisissez son identifiant.")
+                                                            .color(c.text_secondary)
+                                                            .font_size(12.),
+                                                    ),
+                                            )
+                                            .child(
+                                                Button::new()
+                                                    .background(c.surface_tertiary)
+                                                    .hover_background(c.tertiary)
+                                                    .border_fill(Color::TRANSPARENT)
+                                                    .color(c.text_primary)
+                                                    .on_press(on_refresh_models)
+                                                    .child(if is_loading { "⟳ Chargement..." } else { "⟳ Rafraîchir les modèles" }),
+                                            ),
+                                    )
+                                    .child(
+                                        Input::new(model_input.clone())
+                                            .background(c.surface_secondary)
+                                            .focus_background(c.surface_tertiary)
+                                            .border_fill(Color::TRANSPARENT)
+                                            .color(c.text_inverse)
+                                            .placeholder("deepseek-v4-flash")
+                                            .width(Size::fill()),
+                                    )
+                                    .child(
+                                        rect()
+                                            .width(Size::fill())
+                                            .height(Size::px(180.))
+                                            .background(c.surface_secondary)
+                                            .corner_radius(6.)
+                                            .padding(6.)
+                                            .child(if models.is_empty() {
+                                                rect()
+                                                    .width(Size::fill())
+                                                    .height(Size::fill())
+                                                    .center()
+                                                    .child(
+                                                        label()
+                                                            .text(if is_loading { "Récupération des modèles en cours..." } else { "Aucun modèle chargé. Cliquez sur 'Rafraîchir les modèles' ci-dessus." })
+                                                            .color(c.text_placeholder)
+                                                            .font_size(12.),
+                                                    )
+                                                    .into_element()
+                                            } else {
+                                                ScrollView::new().child(
+                                                    rect()
+                                                        .width(Size::fill())
+                                                        .spacing(4.)
+                                                        .children(models.into_iter().map({
+                                                            let model_input = model_input.clone();
+                                                            let c = c.clone();
+                                                            move |m| {
+                                                                let m_clone = m.clone();
+                                                                let is_active = m == current_selected;
+                                                                let bg = if is_active {
+                                                                    c.surface_tertiary
+                                                                } else {
+                                                                    Color::TRANSPARENT
+                                                                };
+                                                                let mut model_input_press = model_input.clone();
+                                                                let m_selected = m.clone();
+                                                                rect()
+                                                                    .width(Size::fill())
+                                                                    .padding(8.)
+                                                                    .background(bg)
+                                                                    .corner_radius(4.)
+                                                                    .horizontal()
+                                                                    .cross_align(Alignment::Center)
+                                                                    .on_press(move |_| {
+                                                                        *model_input_press.write() = m_selected.clone();
+                                                                    })
+                                                                    .child(
+                                                                        label()
+                                                                            .text(if is_active { format!("✓ {}", m_clone) } else { format!("  {}", m_clone) })
+                                                                            .color(if is_active { c.text_primary } else { c.text_secondary })
+                                                                            .font_size(12.),
+                                                                    )
+                                                            }
+                                                        })),
+                                                )
+                                                .into_element()
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                // Feedback / Status & Config file location
+                                rect()
+                                    .width(Size::fill())
+                                    .spacing(6.)
+                                    .child(
+                                        label()
+                                            .text(format!(
+                                                "Fichier de configuration : {}",
+                                                config::ApiKeyConfig::config_file_path().display()
+                                            ))
+                                            .color(c.text_placeholder)
+                                            .font_size(11.),
+                                    )
+                                    .child(if !feedback.read().is_empty() {
+                                        label()
+                                            .text(feedback.read().clone())
+                                            .color(c.warning)
+                                            .font_size(12.)
+                                            .into_element()
+                                    } else {
+                                        rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                                    }),
+                            )
+                            .child(
+                                // Bottom action buttons
+                                rect()
+                                    .width(Size::fill())
+                                    .horizontal()
+                                    .cross_align(Alignment::Center)
+                                    .spacing(12.)
+                                    .child(
+                                        Button::new()
+                                            .background(Color::from_rgb(22, 163, 74))
+                                            .hover_background(Color::from_rgb(21, 128, 61))
+                                            .border_fill(Color::TRANSPARENT)
+                                            .color(Color::WHITE)
+                                            .on_press(on_save)
+                                            .child("💾 Enregistrer"),
+                                    )
+                                    .child(
+                                        Button::new()
+                                            .background(c.surface_tertiary)
+                                            .hover_background(c.tertiary)
+                                            .border_fill(Color::TRANSPARENT)
+                                            .color(c.text_primary)
+                                            .on_press(on_close)
+                                            .child("← Retour"),
+                                    ),
+                            ),
+                    ),
                 ),
         )
 }
@@ -1281,10 +1957,12 @@ where
 fn file_tree_panel(
     current_dir: Readable<std::path::PathBuf>,
     expanded: Writable<std::collections::HashSet<std::path::PathBuf>>,
+    colors: ColorsSheet,
+    on_open_file: impl Fn(std::path::PathBuf) + Clone + 'static,
 ) -> impl IntoElement {
     let dir = current_dir.read().clone();
-    let c = use_theme().read().colors.clone();
-    let rows = build_tree_rows(&dir, 0, expanded.clone(), c.clone());
+    let c = colors;
+    let rows = build_tree_rows(&dir, 0, expanded.clone(), c.clone(), on_open_file);
 
     rect()
         .expanded()
@@ -1324,13 +2002,13 @@ fn file_tree_panel(
 ///
 /// Each directory is rendered as a row with an expand/collapse toggle; when
 /// expanded, its children are rendered beneath it with extra indentation.
-/// Files are rendered as plain rows. The `expanded` set tracks which
-/// directories are currently open, keyed by absolute path.
+/// Files are rendered as clickable buttons that open the file in the code editor.
 fn build_tree_rows(
     dir: &std::path::Path,
     depth: usize,
     expanded: Writable<std::collections::HashSet<std::path::PathBuf>>,
     colors: ColorsSheet,
+    on_open_file: impl Fn(std::path::PathBuf) + Clone + 'static,
 ) -> Vec<Element> {
     let mut rows = Vec::new();
     for entry in file_tree::list_directory(dir) {
@@ -1368,18 +2046,35 @@ fn build_tree_rows(
                     .into_element(),
             );
             if is_expanded {
-                rows.extend(build_tree_rows(&entry.path, depth + 1, expanded.clone(), colors.clone()));
+                rows.extend(build_tree_rows(&entry.path, depth + 1, expanded.clone(), colors.clone(), on_open_file.clone()));
             }
         } else {
+            let file_path = entry.path.clone();
+            let on_open = on_open_file.clone();
+            let open_click = move |_| {
+                on_open(file_path.clone());
+            };
             rows.push(
                 rect()
                     .width(Size::fill())
-                    .padding(Gaps::new(2., 4., 2., indent + 14.))
-                    .horizontal()
-                    .cross_align(Alignment::Center)
-                    .spacing(4.)
-                    .child(label().text("•").color(colors.text_placeholder))
-                    .child(label().text(entry.name.clone()).color(colors.text_highlight))
+                    .padding(Gaps::new(1., 4., 1., indent + 6.))
+                    .child(
+                        Button::new()
+                            .width(Size::fill())
+                            .background(Color::TRANSPARENT)
+                            .hover_background(colors.surface_primary)
+                            .border_fill(Color::TRANSPARENT)
+                            .color(colors.text_highlight)
+                            .on_press(open_click)
+                            .child(
+                                rect()
+                                    .horizontal()
+                                    .cross_align(Alignment::Center)
+                                    .spacing(6.)
+                                    .child(label().text("•").color(colors.text_placeholder))
+                                    .child(label().text(entry.name.clone()).color(colors.text_highlight)),
+                            ),
+                    )
                     .into_element(),
             );
         }
