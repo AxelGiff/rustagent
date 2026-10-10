@@ -1,18 +1,14 @@
+#![allow(dead_code)]
 //! API error handling, retry, and timeout logic.
 //!
 //! This module wraps the Albert API completion calls so that failures are categorized
 //! into user-friendly buckets and transient failures are retried with exponential backoff.
 //! It also provides the multi-turn agentic loop supporting MCP tool calling.
 
-use std::fs;
 use std::time::Duration;
 use futures_util::StreamExt;
-use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-use crate::mcp::McpClient;
 
 /// The maximum number of attempts (including the initial one) for a request.
 const MAX_ATTEMPTS: u32 = 3;
@@ -302,37 +298,20 @@ pub struct Choice {
     pub message: ChatMessage,
 }
 
-/// Boucle agentique multi-tours supportant `tool_choice: "auto"` pour Albert / DeepSeek.
+/// Boucle agentique multi-tours supportant `tool_choice: "auto"` avec les outils natifs Rust.
 pub async fn run_agent_loop(
     endpoint: &str,
     api_key: &str,
     model: &str,
     system_prompt: &str,
     user_prompt: &str,
-    mcp: &McpClient,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
-    // 1. Récupération dynamique des outils MCP
-    let mcp_tools = mcp.list_tools().await.map_err(|e| e.to_string())?;
-    let tools_payload: Vec<Value> = mcp_tools
-        .into_iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description.unwrap_or_default(),
-                    "parameters": t.input_schema
-                }
-            })
-        })
-        .collect();
-
+    let tools_payload = crate::tools::get_tool_definitions();
     let has_tools = !tools_payload.is_empty();
 
-    // 2. Historique initial
     let mut messages = vec![
         ChatMessage {
             role: "system".to_string(),
@@ -348,8 +327,7 @@ pub async fn run_agent_loop(
         },
     ];
 
-    // 3. Boucle agentique (jusqu'à 5 itérations max)
-    for iteration in 0..5 {
+    for iteration in 0..6 {
         println!("[AGENT] Itération {}", iteration + 1);
 
         let req = ChatCompletionRequest {
@@ -380,28 +358,21 @@ pub async fn run_agent_loop(
         let choice = body.choices.into_iter().next().ok_or("Réponse API vide")?;
         let assistant_msg = choice.message;
 
-        // Le modèle a-t-il décidé d'appeler des outils ?
         if let Some(tool_calls) = &assistant_msg.tool_calls {
             if !tool_calls.is_empty() {
                 messages.push(assistant_msg.clone());
 
                 for call in tool_calls {
-                    println!("[MCP EXEC] Appel de {} avec args: {}", call.function.name, call.function.arguments);
+                    println!("[TOOL EXEC] Appel de {} avec args: {}", call.function.name, call.function.arguments);
 
                     let args: Value = serde_json::from_str(&call.function.arguments)
                         .unwrap_or_else(|_| json!({}));
 
-                    // Exécution sur le serveur MCP via stdio
-                    let tool_result = match mcp.call_tool(&call.function.name, args).await {
-                        Ok(res) => res,
-                        Err(e) => format!("Erreur MCP: {}", e),
-                    };
-
-                    println!("[MCP RÉSULTAT] {} octets", tool_result.len());
+                    let tool_result = crate::tools::execute_native_tool(&call.function.name, args).await;
 
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: Some(tool_result),
+                        content: Some(tool_result.content),
                         tool_calls: None,
                         tool_call_id: Some(call.id.clone()),
                     });
@@ -410,7 +381,6 @@ pub async fn run_agent_loop(
             }
         }
 
-        // Réponse finale formulée par le modèle
         if let Some(content) = assistant_msg.content {
             if !content.trim().is_empty() {
                 return Ok(content);
@@ -421,37 +391,26 @@ pub async fn run_agent_loop(
     Err("Nombre maximum d'itérations atteint sans réponse".to_string())
 }
 
-/// Boucle agentique multi-tours supportant `tool_choice: "auto"` avec streaming d'évènements SSE.
-pub async fn run_agent_loop_stream<C>(
+/// Boucle agentique multi-tours native supportant le streaming SSE, l'historique de conversation
+/// et la détection d'aperçus de diffs nécessitant validation utilisateur.
+pub async fn run_agent_loop_stream<C, D>(
     endpoint: &str,
     api_key: &str,
     model: &str,
     system_prompt: &str,
+    history: &[crate::Message],
     user_prompt: &str,
-    mcp: &McpClient,
     mut on_chunk: C,
+    mut on_pending_diff: D,
 ) -> Result<String, String>
 where
     C: FnMut(&str),
+    D: FnMut(crate::diff::PendingDiff),
 {
     let client = reqwest::Client::new();
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
-    let mcp_tools = mcp.list_tools().await.map_err(|e| e.to_string())?;
-    let tools_payload: Vec<Value> = mcp_tools
-        .into_iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description.unwrap_or_default(),
-                    "parameters": t.input_schema
-                }
-            })
-        })
-        .collect();
-
+    let tools_payload = crate::tools::get_tool_definitions();
     let has_tools = !tools_payload.is_empty();
 
     let mut messages = vec![
@@ -461,13 +420,40 @@ where
             tool_calls: None,
             tool_call_id: None,
         },
-        ChatMessage {
-            role: "user".to_string(),
-            content: Some(user_prompt.to_string()),
-            tool_calls: None,
-            tool_call_id: None,
-        },
     ];
+
+    // Inclure l'historique récent (jusqu'à 12 messages) pour maintenir le fil de discussion
+    let history_slice = if history.len() > 12 {
+        &history[history.len() - 12..]
+    } else {
+        history
+    };
+
+    for msg in history_slice {
+        if msg.role == crate::Role::AI && (msg.content.starts_with("Hello!") || msg.content.starts_with("⚠️")) {
+            continue;
+        }
+        let role = match msg.role {
+            crate::Role::User => "user",
+            crate::Role::AI => "assistant",
+        };
+        if !msg.content.trim().is_empty() {
+            messages.push(ChatMessage {
+                role: role.to_string(),
+                content: Some(msg.content.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+    }
+
+    // Ajouter le prompt actuel de l'utilisateur
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: Some(user_prompt.to_string()),
+        tool_calls: None,
+        tool_call_id: None,
+    });
 
     for _iteration in 0..8 {
         let req = json!({
@@ -494,13 +480,30 @@ where
 
         let mut stream = res.bytes_stream();
         let mut buffer = String::new();
+        let mut byte_buffer: Vec<u8> = Vec::new();
         let mut full_content = String::new();
         let mut tool_calls_map: std::collections::BTreeMap<usize, (String, String, String)> =
             std::collections::BTreeMap::new();
 
         while let Some(chunk_res) = stream.next().await {
             let bytes = chunk_res.map_err(|e| e.to_string())?;
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
+            byte_buffer.extend_from_slice(&bytes);
+
+            let valid_len = match std::str::from_utf8(&byte_buffer) {
+                Ok(s) => {
+                    buffer.push_str(s);
+                    byte_buffer.len()
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    if valid_up_to > 0 {
+                        let valid_s = std::str::from_utf8(&byte_buffer[..valid_up_to]).unwrap();
+                        buffer.push_str(valid_s);
+                    }
+                    valid_up_to
+                }
+            };
+            byte_buffer.drain(..valid_len);
 
             while let Some(pos) = buffer.find('\n') {
                 let line = buffer[..pos].trim().to_string();
@@ -586,32 +589,27 @@ where
             messages.push(assistant_msg);
 
             for call in &calls_vec {
-                let notice = format!("\n\n⚙️ Execution de l'outil MCP `{}`...\n\n", call.function.name);
-                on_chunk(&notice);
-
                 let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
-                let target_path = args
-                    .get("path")
-                    .or_else(|| args.get("file"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let old_content = target_path.as_deref().map(|p| std::fs::read_to_string(p).unwrap_or_default());
 
-                let tool_result = match mcp.call_tool(&call.function.name, args).await {
-                    Ok(res) => res,
-                    Err(e) => format!("Erreur MCP: {}", e),
-                };
+                // Exécution de l'outil natif ultra-rapide
+                let tool_result = crate::tools::execute_native_tool(&call.function.name, args).await;
 
-                if let (Some(path), Some(old_text)) = (target_path, old_content) {
-                    let new_text = std::fs::read_to_string(&path).unwrap_or_default();
-                    if !new_text.is_empty() && new_text != old_text {
-                        crate::myers::log_myers_diff(&path, &old_text, &new_text);
-                    }
+                if let Some(diff) = tool_result.pending_diff {
+                    let path = diff.path.clone();
+                    on_pending_diff(diff);
+                    let notice = format!(
+                        "\n\n📝 **Proposition de modification pour `{}`** (aperçu diff généré, en attente de votre validation ci-contre)...\n\n",
+                        path
+                    );
+                    on_chunk(&notice);
+                } else {
+                    let notice = format!("\n\n⚙️ Outil exécuté : `{}`\n\n", call.function.name);
+                    on_chunk(&notice);
                 }
 
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
-                    content: Some(tool_result),
+                    content: Some(tool_result.content),
                     tool_calls: None,
                     tool_call_id: Some(call.id.clone()),
                 });

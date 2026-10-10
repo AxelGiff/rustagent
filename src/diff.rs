@@ -7,6 +7,16 @@ pub enum DiffLine {
     Deleted(String),
 }
 
+/// A pending modification proposed by the AI assistant that awaits explicit user validation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingDiff {
+    pub id: String,
+    pub path: String,
+    pub old_content: String,
+    pub new_content: String,
+    pub diff_lines: Vec<DiffLine>,
+}
+
 /// Compute diff using Myers' algorithm (via `similar` crate configured with `Algorithm::Myers`).
 pub fn computed_diff(old_text: &str, new_text: &str) -> Vec<DiffLine> {
     let diff = TextDiff::configure()

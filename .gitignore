@@ -38,6 +38,8 @@ release/
 
 # Agent memory
 agent_memory.json
+*.bak
+*.sav
 
 # OS generated files
 Thumbs.db

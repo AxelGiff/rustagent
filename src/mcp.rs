@@ -1,4 +1,6 @@
 
+#![allow(dead_code)]
+
 // ============================================================================
 // Module MCP (Model Context Protocol)
 // ----------------------------------------------------------------------------
@@ -6,12 +8,9 @@
 // avec des serveurs MCP externes via le protocole JSON-RPC 2.0 sur stdio.
 // ============================================================================
 
-use std::time::Duration;
-use futures_util::StreamExt;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use serde_json::{json, Value};
-use std::fs;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
