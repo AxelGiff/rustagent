@@ -322,11 +322,13 @@ fn app() -> impl IntoElement {
 
     // Whether the settings panel is open.
     let show_settings = use_state(|| false);
-    // The API key being edited in the settings panel.
     // The settings fields being edited in the settings panel.
-    let settings_key_input = use_state(|| config::ApiKeyConfig::load().key);
-    let settings_model_input = use_state(|| ALBERT_MODEL.to_string());
-    let settings_endpoint_input = use_state(|| ALBERT_ENDPOINT.to_string());
+    let saved_cfg = config::ApiKeyConfig::load();
+    let settings_key_input = use_state(|| saved_cfg.key);
+    let settings_model_input = use_state(|| saved_cfg.model.unwrap_or_else(|| ALBERT_MODEL.to_string()));
+    let settings_endpoint_input = use_state(|| saved_cfg.endpoint.unwrap_or_else(|| ALBERT_ENDPOINT.to_string()));
+    let available_models = use_state(Vec::<String>::new);
+    let models_loading = use_state(|| false);
     // Feedback message shown in the settings panel after saving.
     let settings_feedback = use_state(String::new);
 
@@ -366,7 +368,7 @@ if __name__ == "__main__":
     // be updated whenever code is inserted (or the editor is cleared) and read
     // by `code_editor_panel`. It is derived from the script content so the
     // title reflects what was actually written, falling back to `main.<ext>`
-    // when no meaningful name can be derived.
+    // conscience no meaningful name can be derived.
     let file_name = use_state(|| {
         flow::derive_file_name(&editor.read().rope.to_string(), *current_language.read())
     });
@@ -391,7 +393,35 @@ if __name__ == "__main__":
         }
     };
 
-    // Save the API key entered in the settings panel to the config file.
+    // Refresh models from API endpoint
+    let refresh_models = {
+        let mut available_models = available_models;
+        let mut models_loading = models_loading;
+        let mut settings_feedback = settings_feedback;
+        let endpoint_val = settings_endpoint_input.read().clone();
+        let key_val = settings_key_input.read().clone();
+        move |_| {
+            let ep = endpoint_val.trim().to_string();
+            let k = key_val.trim().to_string();
+            let mut available_models = available_models;
+            let mut models_loading = models_loading;
+            let mut settings_feedback = settings_feedback;
+            *models_loading.write() = true;
+            spawn(async move {
+                match api::fetch_models(&ep, &k).await {
+                    Ok(models) => {
+                        *available_models.write() = models;
+                        *settings_feedback.write() = String::new();
+                    }
+                    Err(e) => {
+                        *settings_feedback.write() = format!("Erreur modèles: {}", e);
+                    }
+                }
+                *models_loading.write() = false;
+            });
+        }
+    };
+
     // Save the API key, model, and endpoint entered in the settings panel to the config file.
     let save_api_key = {
         let mut settings_feedback = settings_feedback;
@@ -400,15 +430,16 @@ if __name__ == "__main__":
             let key = settings_key_input.read().trim().to_string();
             let model = settings_model_input.read().trim().to_string();
             let endpoint = settings_endpoint_input.read().trim().to_string();
-           let cfg = config::ApiKeyConfig {
-            key: key.clone(),
-            source: config::KeySource::ConfigFile,
-        };
+            let cfg = config::ApiKeyConfig {
+                key: key.clone(),
+                model: if model.is_empty() { None } else { Some(model) },
+                endpoint: if endpoint.is_empty() { None } else { Some(endpoint) },
+                source: config::KeySource::ConfigFile,
+            };
             match cfg.validate() {
                 Ok(()) => match cfg.save() {
                     Ok(()) => {
-                        *settings_feedback.write() = "API key saved to config file.".to_string();
-                        *settings_feedback.write() = "Settings saved to config file.".to_string();
+                        *settings_feedback.write() = "Paramètres enregistrés.".to_string();
                         // Close the panel after a successful save.
                         *show_settings.write() = false;
                     }
@@ -510,11 +541,12 @@ if __name__ == "__main__":
                     return;
                 }
 
-                // Build an OpenAI-compatible Completions client pointed at the Albert endpoint
                 // Build an OpenAI-compatible Completions client pointed at the configured endpoint
+                let endpoint_to_use = api_key_config.endpoint.clone().unwrap_or_else(|| ALBERT_ENDPOINT.to_string());
+                let model_to_use = api_key_config.model.clone().unwrap_or_else(|| ALBERT_MODEL.to_string());
                 let client = openai::CompletionsClient::builder()
                     .api_key(&api_key_config.key)
-                    .base_url(ALBERT_ENDPOINT)
+                    .base_url(&endpoint_to_use)
                     .build();
 
               match client {
@@ -562,9 +594,9 @@ if __name__ == "__main__":
                         let ai_msg_idx = messages.read().len() - 1;
 
                         // 4. Exécution de la boucle agentique avec streaming
-                        let endpoint = ALBERT_ENDPOINT.to_string();
+                        let endpoint = endpoint_to_use;
                         let api_key = api_key_config.key.clone();
-                        let model = ALBERT_MODEL.to_string();
+                        let model = model_to_use;
                         let user_msg = user_message.clone();
                         let mcp_clone = mcp.clone();
                         let mut messages_stream = messages;
@@ -843,8 +875,25 @@ if __name__ == "__main__":
                 .color(c.text_secondary)
                 .on_press({
                     let mut show_settings = show_settings;
+                    let mut available_models = available_models;
+                    let mut models_loading = models_loading;
+                    let ep_val = settings_endpoint_input.read().clone();
+                    let key_val = settings_key_input.read().clone();
                     move |_| {
                         *show_settings.write() = true;
+                        if available_models.read().is_empty() {
+                            let ep = ep_val.trim().to_string();
+                            let k = key_val.trim().to_string();
+                            let mut available_models = available_models;
+                            let mut models_loading = models_loading;
+                            *models_loading.write() = true;
+                            spawn(async move {
+                                if let Ok(m) = api::fetch_models(&ep, &k).await {
+                                    *available_models.write() = m;
+                                }
+                                *models_loading.write() = false;
+                            });
+                        }
                     }
                 })
                 .child("Settings"),
@@ -908,12 +957,28 @@ if __name__ == "__main__":
             .opacity(0.35),
         );
 
+    let show_settings_val = *show_settings.read();
+
     rect()
         .expanded()
         .background(c.background)
         .content(Content::Flex)
         .child(toolbar)
-        .child(
+        .child(if show_settings_val {
+            settings_page_view(
+                c.clone(),
+                settings_key_input.into(),
+                settings_model_input.into(),
+                settings_endpoint_input.into(),
+                available_models.into(),
+                models_loading.into(),
+                settings_feedback.into(),
+                refresh_models,
+                save_api_key,
+                close_settings,
+            )
+            .into_element()
+        } else {
             rect()
                 .expanded()
                 .child(
@@ -941,10 +1006,6 @@ if __name__ == "__main__":
                         )
                         .panel(
                             ResizablePanel::new(PanelSize::percent(50.)).child(
-                                // The editor and terminal are stacked vertically
-                                // (editor on top, terminal below) so the terminal
-                                // sits directly beneath the code editor, while the
-                                // chat panel keeps the full height of the window.
                                 ResizableContainer::new()
                                     .direction(Direction::Vertical)
                                     .panel(ResizablePanel::new(PanelSize::percent(50.)).child(
@@ -962,72 +1023,98 @@ if __name__ == "__main__":
                         ),
                 )
                 .child(overlay)
-                .child(if *show_settings.read() {
-                    settings_panel(
-                        settings_key_input.into(),
-                        settings_model_input.into(),
-                        settings_endpoint_input.into(),
-                        settings_feedback.into(),
-                        save_api_key,
-                        close_settings,
-                    )
-                    .into_element()
-                } else {
-                    rect()
-                        .layer(Layer::Overlay)
-                        .width(Size::px(0.))
-                        .height(Size::px(0.))
-                        .into_element()
-                }),
-        )
+                .into_element()
+        })
 }
 
-/// A modal settings panel for configuring the Albert API key.
-/// A modal settings panel for configuring the Albert API key, model, and endpoint.
-fn settings_panel<H1, H2>(
+/// A dedicated, accessible settings view with a clean centered card layout.
+fn settings_page_view<H0, H1, H2>(
+    c: ColorsSheet,
     key_input: Writable<String>,
     model_input: Writable<String>,
     endpoint_input: Writable<String>,
+    available_models: Readable<Vec<String>>,
+    models_loading: Readable<bool>,
     feedback: Writable<String>,
+    on_refresh_models: H0,
     on_save: H1,
     on_close: H2,
 ) -> impl IntoElement
 where
+    H0: Into<EventHandler<Event<PressEventData>>>,
     H1: Into<EventHandler<Event<PressEventData>>>,
     H2: Into<EventHandler<Event<PressEventData>>>,
 {
-    let c = use_theme().read().colors.clone();
+    let models = available_models.read().clone();
+    let is_loading = *models_loading.read();
+    let current_selected = model_input.read().clone();
+    let modal_bg = Color::from_rgb(28, 29, 34);
+
     rect()
-        .layer(Layer::Overlay)
-        .position(Position::new_absolute().top(0.).left(0.))
-        .width(Size::fill())
-        .height(Size::fill())
-        .background(c.overlay)
+        .expanded()
+        .background(c.background)
+        .content(Content::Flex)
         .center()
         .child(
             rect()
-                .width(Size::px(480.))
-                .padding(24.)
-                .background(c.surface_primary)
+                .width(Size::px(640.))
+                .padding(28.)
+                .background(modal_bg)
                 .corner_radius(12.)
-                .shadow(Shadow::new().x(0.).y(4.).blur(20.).color(c.shadow))
+                .border(Border::new().fill(Color::from_rgb(52, 54, 64)).width(BorderWidth {
+                    top: 1.,
+                    right: 1.,
+                    bottom: 1.,
+                    left: 1.,
+                }))
+                .shadow(Shadow::new().x(0.).y(10.).blur(32.).color(Color::from_argb(180, 0, 0, 0)))
                 .content(Content::Flex)
-                .spacing(12.)
+                .spacing(14.)
+                .child(
+                    rect()
+                        .width(Size::fill())
+                        .content(Content::Flex)
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .child(
+                            rect()
+                                .width(Size::flex(1.))
+                                .content(Content::Flex)
+                                .spacing(2.)
+                                .child(
+                                    label()
+                                        .text("Configuration IA & Modèles")
+                                        .color(c.text_primary)
+                                        .font_size(18.)
+                                        .font_weight(FontWeight::BOLD),
+                                )
+                                .child(
+                                    label()
+                                        .text("Paramétrez vos clés d'API et vos modèles.")
+                                        .color(c.text_secondary)
+                                        .font_size(12.),
+                                ),
+                        )
+                        .child(
+                            Button::new()
+                                .background(c.surface_tertiary)
+                                .hover_background(c.tertiary)
+                                .border_fill(Color::TRANSPARENT)
+                                .color(c.text_primary)
+                                .on_press(on_close)
+                                .child("✕ Fermer"),
+                        ),
+                )
                 .child(
                     label()
-                        .text("Settings")
-                        .color(c.text_primary)
-                        .font_size(18.)
+                        .text("Clé API")
+                        .color(c.text_secondary)
+                        .font_size(13.)
                         .font_weight(FontWeight::BOLD),
                 )
                 .child(
-                    label()
-                        .text("Albert API Key")
-                        .color(c.text_secondary)
-                        .font_size(13.),
-                )
-                .child(
                     Input::new(key_input)
+                        .mode(InputMode::Hidden('•'))
                         .background(c.surface_secondary)
                         .focus_background(c.surface_tertiary)
                         .border_fill(Color::TRANSPARENT)
@@ -1037,24 +1124,10 @@ where
                 )
                 .child(
                     label()
-                        .text("AI Model")
+                        .text("URL Endpoint API")
                         .color(c.text_secondary)
-                        .font_size(13.),
-                )
-                .child(
-                    Input::new(model_input)
-                        .background(c.surface_secondary)
-                        .focus_background(c.surface_tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_inverse)
-                        .placeholder("deepseek-v4-flash")
-                        .width(Size::fill()),
-                )
-                .child(
-                    label()
-                        .text("API Endpoint URL")
-                        .color(c.text_secondary)
-                        .font_size(13.),
+                        .font_size(13.)
+                        .font_weight(FontWeight::BOLD),
                 )
                 .child(
                     Input::new(endpoint_input)
@@ -1066,9 +1139,102 @@ where
                         .width(Size::fill()),
                 )
                 .child(
+                    rect()
+                        .width(Size::fill())
+                        .content(Content::Flex)
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .child(
+                            rect()
+                                .width(Size::flex(1.))
+                                .child(
+                                    label()
+                                        .text("Modèle sélectionné")
+                                        .color(c.text_secondary)
+                                        .font_size(13.)
+                                        .font_weight(FontWeight::BOLD),
+                                ),
+                        )
+                        .child(
+                            Button::new()
+                                .background(c.surface_tertiary)
+                                .hover_background(c.tertiary)
+                                .border_fill(Color::TRANSPARENT)
+                                .color(c.text_inverse)
+                                .on_press(on_refresh_models)
+                                .child(if is_loading { "Chargement..." } else { "⟳ Rafraîchir" }),
+                        ),
+                )
+                .child(
+                    Input::new(model_input.clone())
+                        .background(c.surface_secondary)
+                        .focus_background(c.surface_tertiary)
+                        .border_fill(Color::TRANSPARENT)
+                        .color(c.text_inverse)
+                        .placeholder("deepseek-v4-flash")
+                        .width(Size::fill()),
+                )
+                .child(
+                    rect()
+                        .width(Size::fill())
+                        .height(Size::px(150.))
+                        .background(c.surface_secondary)
+                        .corner_radius(6.)
+                        .padding(6.)
+                        .child(if models.is_empty() {
+                            rect()
+                                .width(Size::fill())
+                                .height(Size::fill())
+                                .center()
+                                .child(
+                                    label()
+                                        .text(if is_loading { "Récupération des modèles en cours..." } else { "Aucun modèle chargé. Cliquez sur 'Rafraîchir modèles' ci-dessus." })
+                                        .color(c.text_placeholder)
+                                        .font_size(12.),
+                                )
+                                .into_element()
+                        } else {
+                            ScrollView::new().child(
+                                rect()
+                                    .width(Size::fill())
+                                    .spacing(4.)
+                                    .children(models.into_iter().map({
+                                        let model_input = model_input.clone();
+                                        let c = c.clone();
+                                        move |m| {
+                                            let m_clone = m.clone();
+                                            let is_active = m == current_selected;
+                                            let bg = if is_active {
+                                                c.surface_tertiary
+                                            } else {
+                                                Color::TRANSPARENT
+                                            };
+                                            let mut model_input_press = model_input.clone();
+                                            let m_selected = m.clone();
+                                            rect()
+                                                .width(Size::fill())
+                                                .padding(6.)
+                                                .background(bg)
+                                                .corner_radius(4.)
+                                                .on_press(move |_| {
+                                                    *model_input_press.write() = m_selected.clone();
+                                                })
+                                                .child(
+                                                    label()
+                                                        .text(m_clone)
+                                                        .color(if is_active { c.text_primary } else { c.text_secondary })
+                                                        .font_size(12.),
+                                                )
+                                        }
+                                    })),
+                            )
+                            .into_element()
+                        }),
+                )
+                .child(
                     label()
                         .text(format!(
-                            "Saved to: {}",
+                            "Configuration enregistrée dans : {}",
                             config::ApiKeyConfig::config_file_path().display()
                         ))
                         .color(c.text_placeholder)
@@ -1088,26 +1254,19 @@ where
                 })
                 .child(
                     rect()
+                        .width(Size::fill())
                         .horizontal()
                         .cross_align(Alignment::Center)
-                        .spacing(8.)
+                        .spacing(10.)
                         .child(
                             Button::new()
+                                .width(Size::px(130.))
                                 .background(c.surface_tertiary)
                                 .hover_background(c.tertiary)
                                 .border_fill(Color::TRANSPARENT)
                                 .color(c.text_inverse)
                                 .on_press(on_save)
-                                .child("Save"),
-                        )
-                        .child(
-                            Button::new()
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(Color::TRANSPARENT)
-                                .color(c.text_inverse)
-                                .on_press(on_close)
-                                .child("Close"),
+                                .child("Enregistrer"),
                         ),
                 ),
         )

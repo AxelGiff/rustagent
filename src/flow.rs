@@ -27,7 +27,6 @@ pub const ACTION_KEYWORDS: &[&str] = &[
     "script",
     "function",
     "class",
-    "edit",
     "edite",
     "édite",
     "editer",
@@ -52,7 +51,6 @@ pub const ACTION_KEYWORDS: &[&str] = &[
     "générer",
     "rajoute-moi",
     "ajoute-moi",
-    "fichier",
 ];
 
 /// Whether the user wants to clear the editor.
@@ -70,6 +68,9 @@ pub fn wants_clear_editor(message: &str) -> bool {
 
 /// Whether the user wants code generated.
 pub fn wants_code(message: &str) -> bool {
+    if wants_clear_editor(message) {
+        return false;
+    }
     let lower = message.to_lowercase();
     ACTION_KEYWORDS.iter().any(|k| lower.contains(k))
 }
@@ -94,12 +95,14 @@ pub fn decide_editor_action(
     wants_code: bool,
     detected_language: SupportedLanguage,
 ) -> EditorAction {
-    let code = extract_code_from_response(response, detected_language);
-    if !code.is_empty() && (wants_code || response.contains("```")) {
-        return EditorAction::Insert {
-            language: detected_language,
-            code,
-        };
+    if wants_code {
+        let code = extract_code_from_response(response, detected_language);
+        if !code.is_empty() {
+            return EditorAction::Insert {
+                language: detected_language,
+                code,
+            };
+        }
     }
     EditorAction::ShowResponse
 }
