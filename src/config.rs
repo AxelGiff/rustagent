@@ -31,7 +31,7 @@ pub enum KeySource {
     Missing,
 }
 
-/// The resolved API key configuration.
+/// The resolved API key and model configuration.
 #[derive(Clone, Debug)]
 pub struct ApiKeyConfig {
     /// The API key, or an empty string if none was found.
@@ -39,6 +39,10 @@ pub struct ApiKeyConfig {
     /// Where the key came from.
     #[allow(dead_code)] // used for future user-facing source reporting
     pub source: KeySource,
+    /// The selected model, if any.
+    pub model: Option<String>,
+    /// The custom endpoint, if any.
+    pub endpoint: Option<String>,
 }
 
 /// The on-disk representation of the config file.
@@ -46,48 +50,63 @@ pub struct ApiKeyConfig {
 pub struct FileConfig {
     /// The Albert API key.
     pub api_key: Option<String>,
+    /// The chosen AI model.
+    pub model: Option<String>,
+    /// The custom API endpoint.
+    pub endpoint: Option<String>,
 }
 
 impl ApiKeyConfig {
-    /// Load the API key from the environment variable first, then the config
-    /// file. Returns a config with an empty key and `KeySource::Missing` if
-    /// neither source provides one.
+    /// Load the configuration from the environment variable and/or config file.
     pub fn load() -> ApiKeyConfig {
-        // 1. Environment variable (highest priority).
+        let file_cfg = Self::load_file_config();
+
+        // 1. Environment variable (highest priority for key).
         if let Ok(key) = std::env::var(API_KEY_ENV) {
             let key = key.trim().to_string();
             if !key.is_empty() {
                 return ApiKeyConfig {
                     key,
                     source: KeySource::Environment,
+                    model: file_cfg.as_ref().and_then(|c| c.model.clone()),
+                    endpoint: file_cfg.as_ref().and_then(|c| c.endpoint.clone()),
                 };
             }
         }
 
         // 2. Config file.
-        if let Some(key) = Self::load_from_file() {
-            let key = key.trim().to_string();
+        if let Some(cfg) = file_cfg {
+            let key = cfg.api_key.unwrap_or_default().trim().to_string();
             if !key.is_empty() {
                 return ApiKeyConfig {
                     key,
                     source: KeySource::ConfigFile,
+                    model: cfg.model,
+                    endpoint: cfg.endpoint,
                 };
             }
+            return ApiKeyConfig {
+                key: String::new(),
+                source: KeySource::Missing,
+                model: cfg.model,
+                endpoint: cfg.endpoint,
+            };
         }
 
         // 3. Nothing found.
         ApiKeyConfig {
             key: String::new(),
             source: KeySource::Missing,
+            model: None,
+            endpoint: None,
         }
     }
 
-    /// Read the API key from the config file, if present.
-    fn load_from_file() -> Option<String> {
+    /// Read the config file, if present.
+    fn load_file_config() -> Option<FileConfig> {
         let path = Self::config_file_path();
         let content = std::fs::read_to_string(&path).ok()?;
-        let config: FileConfig = toml::from_str(&content).ok()?;
-        config.api_key
+        toml::from_str(&content).ok()
     }
 
     /// The absolute path to the config file.
@@ -95,7 +114,7 @@ impl ApiKeyConfig {
         crate::platform::config_dir().join(CONFIG_FILE_NAME)
     }
 
-    /// Persist the API key to the config file, creating the directory if
+    /// Persist the API key, model, and endpoint to the config file, creating the directory if
     /// needed. Returns an error message on failure.
     pub fn save(&self) -> Result<(), String> {
         let path = Self::config_file_path();
@@ -105,6 +124,8 @@ impl ApiKeyConfig {
         }
         let config = FileConfig {
             api_key: Some(self.key.clone()),
+            model: self.model.clone(),
+            endpoint: self.endpoint.clone(),
         };
         let content = toml::to_string_pretty(&config)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
@@ -139,6 +160,8 @@ mod tests {
         let cfg = ApiKeyConfig {
             key: String::new(),
             source: KeySource::Missing,
+            model: None,
+            endpoint: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -148,6 +171,8 @@ mod tests {
         let cfg = ApiKeyConfig {
             key: "abc def".to_string(),
             source: KeySource::Environment,
+            model: None,
+            endpoint: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -157,6 +182,8 @@ mod tests {
         let cfg = ApiKeyConfig {
             key: "sk-1234567890abcdef".to_string(),
             source: KeySource::Environment,
+            model: None,
+            endpoint: None,
         };
         assert!(cfg.validate().is_ok());
     }
