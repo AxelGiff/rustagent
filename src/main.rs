@@ -851,6 +851,9 @@ if __name__ == "__main__":
                 }
             };
             if let Some(diff) = diff_opt {
+                if let Some(parent) = std::path::Path::new(&diff.path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 if let Err(e) = std::fs::write(&diff.path, &diff.new_content) {
                     messages.write().push(Message {
                         role: Role::AI,
@@ -1053,15 +1056,65 @@ if __name__ == "__main__":
 
                     async move {
                         println!("[DEBUG] Prompt envoyé : {}", user_msg);
+
+                        // Analyse du contexte actif (diffs en attente et historique) pour identifier le sous-projet
+                        let active_context = {
+                            let diffs = pending_diffs_stream.read();
+                            if !diffs.is_empty() {
+                                let list = diffs.iter().map(|d| format!("- `{}`", d.path)).collect::<Vec<_>>().join("\n");
+                                format!(
+                                    "\n\n[CONTEXTE DU SOUS-PROJET EN COURS]\nFichiers déjà préparés pour ce projet :\n{}\nIMPORTANT : L'utilisateur travaille sur ce sous-projet. Tu DOIS impérativement continuer dans ce même dossier et ses sous-dossiers. Ne réinitialise JAMAIS le contexte vers la racine de l'agent !",
+                                    list
+                                )
+                            } else {
+                                let mut recent_paths = Vec::new();
+                                for msg in history.iter().rev().take(8) {
+                                    for line in msg.content.lines() {
+                                        if let Some(pos) = line.find("- `") {
+                                            if let Some(end) = line[pos + 3..].find('`') {
+                                                let p = &line[pos + 3..pos + 3 + end];
+                                                if !recent_paths.contains(&p.to_string()) && (p.contains('/') || p.contains('\\')) {
+                                                    recent_paths.push(p.to_string());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if !recent_paths.is_empty() {
+                                    format!(
+                                        "\n\n[CONTEXTE DU SOUS-PROJET EN COURS]\nFichiers récemment manipulés :\n{}\nIMPORTANT : L'utilisateur poursuit le travail sur ce sous-projet. Reste impérativement dans ce sous-dossier et n'explore pas la racine de l'agent !",
+                                        recent_paths.iter().map(|p| format!("- `{}`", p)).collect::<Vec<_>>().join("\n")
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            }
+                        };
+
+                        let system_prompt = format!(
+                            "Tu es un assistant de programmation expert et autonome. Tu as accès aux outils natifs du projet (read_file, write_file, edit_file, list_directory, search_files, run_command).
+
+DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
+1. PRIORITÉ À L'ACTION ET INTERDICTION DE SUR-ANALYSE :
+- Ne passe JAMAIS tes tours à lire fichier après fichier à l'infini avec `read_file` ou `list_directory`.
+- Limite-toi à lire au grand maximum 2 fichiers essentiels, puis PASSE IMMÉDIATEMENT À L'ACTION en créant ou modifiant les fichiers nécessaires avec `write_file` ou `edit_file`.
+- Dès qu'une incohérence ou un fichier manquant est détecté (ex: app.module.ts, index.html, styles.css), NE LIS PAS d'autres fichiers (comme les polyfills ou l'environnement) : CRÉE-LES OU MODIFIE-LES TOUT DE SUITE !
+2. SIGNIFICATION DE 'CONTINUE' OU 'APPLIQUE' :
+- Lorsque l'utilisateur dit 'continue', 'applique', ou demande la suite : CELA SIGNIFIE EXCLUSIVEMENT D'ÉCRIRE LE CODE ET D'APPLIQUER LES MODIFICATIONS avec `write_file` ou `edit_file`.
+- Tu as l'interdiction formelle de relire des fichiers ou de refaire un diagnostic lorsque l'utilisateur te demande de continuer : applique directement les étapes identifiées.
+3. CRÉATION COMPLÈTE DE PROJET EN UNE SEULE FOIS : Lorsque l'utilisateur te demande d'initialiser ou créer un projet (ex: Django, Angular, React, etc.) ou une fonctionnalité, TU DOIS PRÉPARER L'ENSEMBLE DES FICHIERS NÉCESSAIRES DANS LA MÊME SESSION. Ne t'arrête JAMAIS après 1 ou 2 fichiers en demandant à l'utilisateur s'il veut continuer ! Enchaîne tous les appels `write_file` nécessaires pour livrer un projet 100% complet et fonctionnel (structure, configuration, modèles, vues/routes, templates, dépendances, README).
+4. PAS D'ATTENTE DE VALIDATION : Chaque `write_file` génère un diff en arrière-plan que l'utilisateur validera à la fin. Ne t'arrête pas pour attendre sa validation entre chaque fichier. Continue d'appeler les outils jusqu'à ce que tous les fichiers du projet soient préparés.
+5. RESPECT STRICT DU DOSSIER CIBLE : Si l'utilisateur mentionne un dossier cible (ex: `./Pictures`, `./Pictures/flashcards` ou un sous-dossier), TOUS les chemins de fichiers pour `write_file`, `read_file` ou `list_directory` et les commandes doivent impérativement cibler ce dossier et ses sous-dossiers. N'explore et ne touche JAMAIS au dossier racine de l'agent (`rustagent`) lorsque l'utilisateur crée ou modifie un projet dans un sous-dossier.
+6. POURSUITE DE CONVERSATION : Si l'utilisateur dit 'continue' ou demande la suite, identifie le sous-projet en cours et poursuis DANS LE MÊME SOUS-DOSSIER. Ne réinitialise JAMAIS le contexte vers la racine de l'agent.
+7. FIN DE TÂCHE : Ce n'est qu'une fois TOUS les fichiers du projet préparés que tu dois conclure par une synthèse claire listant les fichiers créés et fournissant les commandes exactes à lancer pour exécuter le projet.{}",
+                            active_context
+                        );
+
                         api::run_agent_loop_stream(
                             &endpoint,
                             &api_key,
                             &model,
-                            "Tu es un assistant de programmation expert. Tu as accès aux outils natifs du projet (read_file, write_file, edit_file, list_directory, search_files, run_command). \
-                             IMPORTANT : Ne liste et n'explore JAMAIS les répertoires `target/`, `.git/` ou `node_modules/`. \
-                             Privilégie `list_directory` sur `src/` ou à la racine. \
-                             Lorsque tu proposes d'éditer ou créer un fichier, un diff est automatiquement généré pour validation utilisateur avant écriture sur disque. \
-                             Sois précis, concis et efficace.",
+                            &system_prompt,
                             &history,
                             &user_msg,
                             |chunk| {

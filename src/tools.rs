@@ -86,13 +86,13 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "list_directory",
-                "description": "Liste les fichiers et répertoires d'un dossier. Ignore automatiquement 'target/', '.git/', 'node_modules/'.",
+                "description": "Liste les fichiers et répertoires d'un dossier. IMPORTANT : Spécifiez toujours le chemin du sous-dossier ciblé (ex: './Pictures' ou './Pictures/flashcards') si vous travaillez dans un projet spécifique.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Chemin du dossier (ex: '.' ou 'src'). Par défaut '.'."
+                            "description": "Chemin du dossier à explorer (ex: '.' ou './Pictures/mon_projet')."
                         }
                     }
                 }
@@ -123,13 +123,17 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "Exécute une commande terminal/shell dans le projet (ex: 'cargo check', 'cargo test', 'git status').",
+                "description": "Exécute une commande terminal/shell dans le projet (ex: 'python manage.py runserver', 'cargo test', 'pip install ...').",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
                             "description": "Commande shell à exécuter."
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Dossier de travail où exécuter la commande (optionnel, ex: './Pictures/flashcards')."
                         }
                     },
                     "required": ["command"]
@@ -158,7 +162,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
             match std::fs::read_to_string(path_str) {
                 Ok(content) => ToolResult {
-                    content,
+                    content: truncate_output(&content, 300, 15000),
                     pending_diff: None,
                 },
                 Err(e) => ToolResult {
@@ -202,7 +206,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
             ToolResult {
                 content: format!(
-                    "La modification pour '{}' a été soumise à validation utilisateur. Le diff est affiché dans l'interface et attend que l'utilisateur clique sur 'Accepter' avant toute écriture sur le disque.",
+                    "Fichier '{}' préparé avec succès (diff enregistré). ACTION REQUISE : Continue immédiatement à créer ou modifier tous les autres fichiers nécessaires du projet sans t'interrompre. L'utilisateur validera l'ensemble des diffs à la fin.",
                     path_str
                 ),
                 pending_diff: Some(pending_diff),
@@ -264,7 +268,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
             ToolResult {
                 content: format!(
-                    "Le remplacement dans '{}' a été préparé et soumis à validation. Le diff est visible dans l'interface pour confirmation.",
+                    "Modification pour '{}' préparée avec succès (diff enregistré). Continue immédiatement les étapes suivantes du projet sans t'interrompre.",
                     path_str
                 ),
                 pending_diff: Some(pending_diff),
@@ -344,6 +348,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
         "run_command" => {
             let cmd_str = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let cwd_str = args.get("cwd").and_then(|v| v.as_str());
             if cmd_str.trim().is_empty() {
                 return ToolResult {
                     content: "Erreur: argument 'command' vide.".to_string(),
@@ -351,7 +356,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 };
             }
 
-            let output = run_shell_command(cmd_str).await;
+            let output = run_shell_command(cmd_str, cwd_str).await;
             ToolResult {
                 content: output,
                 pending_diff: None,
@@ -412,7 +417,46 @@ fn search_dir_recursive(
 }
 
 /// Executes a shell command with a timeout.
-async fn run_shell_command(cmd: &str) -> String {
+/// Truncate text if it exceeds line or character limits to preserve context window.
+pub fn truncate_output(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let lines: Vec<&str> = trimmed.lines().collect();
+    let lines_truncated = if lines.len() > max_lines {
+        let half = max_lines / 2;
+        let head = &lines[..half];
+        let tail_start = lines.len().saturating_sub(half);
+        let tail = &lines[tail_start..];
+        let omitted = lines.len().saturating_sub(head.len() + tail.len());
+        format!(
+            "{}\n\n[... {} lignes omises pour préserver le contexte ...]\n\n{}",
+            head.join("\n"),
+            omitted,
+            tail.join("\n")
+        )
+    } else {
+        trimmed.to_string()
+    };
+
+    if lines_truncated.len() > max_chars {
+        let half_chars = max_chars / 2;
+        let omitted_chars = lines_truncated.len().saturating_sub(max_chars);
+        format!(
+            "{}\n[... {} caractères omis ...]\n{}",
+            &lines_truncated[..half_chars.min(lines_truncated.len())],
+            omitted_chars,
+            &lines_truncated[lines_truncated.len().saturating_sub(half_chars)..]
+        )
+    } else {
+        lines_truncated
+    }
+}
+
+/// Executes a shell command with a timeout, optionally within a working directory.
+async fn run_shell_command(cmd: &str, cwd: Option<&str>) -> String {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = tokio::process::Command::new("cmd");
         c.args(["/C", cmd]);
@@ -423,16 +467,28 @@ async fn run_shell_command(cmd: &str) -> String {
         c
     };
 
+    if let Some(dir) = cwd {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            let path = Path::new(trimmed);
+            if path.exists() {
+                command.current_dir(path);
+            }
+        }
+    }
+
     match tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let status = output.status;
+            let truncated_stdout = truncate_output(&stdout, 30, 2000);
+            let truncated_stderr = truncate_output(&stderr, 30, 2000);
             format!(
                 "Statut: {}\n--- STDOUT ---\n{}\n--- STDERR ---\n{}",
                 status,
-                stdout.trim(),
-                stderr.trim()
+                truncated_stdout,
+                truncated_stderr
             )
         }
         Ok(Err(e)) => format!("Erreur lors de l'exécution de la commande: {}", e),
@@ -443,6 +499,23 @@ async fn run_shell_command(cmd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_truncate_output() {
+        let short = "Line 1\nLine 2";
+        assert_eq!(truncate_output(short, 10, 100), short);
+
+        let long_lines = (1..=50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let truncated = truncate_output(&long_lines, 10, 10000);
+        assert!(truncated.contains("omises pour préserver le contexte"));
+        assert!(truncated.contains("Line 1"));
+        assert!(truncated.contains("Line 50"));
+
+        let huge_text = "a".repeat(5000);
+        let truncated_chars = truncate_output(&huge_text, 100, 200);
+        assert!(truncated_chars.len() < 1000);
+        assert!(truncated_chars.contains("caractères omis"));
+    }
 
     #[tokio::test]
     async fn test_tool_definitions_valid() {
