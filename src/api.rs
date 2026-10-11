@@ -455,12 +455,71 @@ where
         tool_call_id: None,
     });
 
-    for _iteration in 0..8 {
+    let mut accumulated_content = String::new();
+    let mut tool_executions_count: usize = 0;
+    let mut consecutive_read_turns: usize = 0;
+    let mut created_files: Vec<String> = Vec::new();
+    const MAX_AGENT_ITERATIONS: usize = 20;
+
+    for iteration in 0..MAX_AGENT_ITERATIONS {
+        // En dernière itération, forcer le modèle à synthétiser en texte en désactivant les outils
+        let is_last_iteration = iteration == MAX_AGENT_ITERATIONS - 1;
+        let allow_tools = has_tools && !is_last_iteration;
+
+        // Si le modèle a enchaîné trop de lectures sans modifier de code, on bloque les outils de lecture
+        let active_tools = if allow_tools {
+            if consecutive_read_turns >= 3 {
+                let filtered: Vec<Value> = tools_payload
+                    .iter()
+                    .filter(|t| {
+                        let name = t.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("");
+                        name == "write_file" || name == "edit_file" || name == "run_command"
+                    })
+                    .cloned()
+                    .collect();
+                Some(filtered)
+            } else {
+                Some(tools_payload.clone())
+            }
+        } else {
+            None
+        };
+        let has_active_tools = active_tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
+
+        // Compaction de l'historique antérieur pour préserver la fenêtre de contexte
+        let total_msgs = messages.len();
+        if total_msgs > 8 {
+            for idx in 0..total_msgs.saturating_sub(6) {
+                if let Some(calls) = &mut messages[idx].tool_calls {
+                    for call in calls.iter_mut() {
+                        if call.function.name == "write_file" || call.function.name == "edit_file" {
+                            if let Ok(mut parsed) = serde_json::from_str::<Value>(&call.function.arguments) {
+                                if parsed.get("content").is_some() {
+                                    parsed["content"] = json!("[Contenu déjà fourni au tour précédent]");
+                                    call.function.arguments = parsed.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
+                if messages[idx].role == "tool" {
+                    if let Some(content) = &mut messages[idx].content {
+                        if content.len() > 1000 {
+                            *content = crate::tools::truncate_output(content, 15, 800);
+                        }
+                    }
+                }
+            }
+        }
+
         let req = json!({
             "model": model,
             "messages": messages,
-            "tools": if has_tools { Some(tools_payload.clone()) } else { None },
-            "tool_choice": if has_tools { Some("auto".to_string()) } else { None },
+            "tools": if has_active_tools { active_tools } else { None },
+            "tool_choice": if has_active_tools { Some("auto".to_string()) } else { None },
             "stream": true
         });
 
@@ -558,6 +617,10 @@ where
             }
         }
 
+        if !full_content.is_empty() {
+            accumulated_content.push_str(&full_content);
+        }
+
         if !tool_calls_map.is_empty() {
             let mut calls_vec = Vec::new();
             for (idx, (id, name, args)) in tool_calls_map.values().enumerate() {
@@ -588,7 +651,17 @@ where
             };
             messages.push(assistant_msg);
 
+            let has_mutation = calls_vec.iter().any(|c| {
+                c.function.name == "write_file" || c.function.name == "edit_file" || c.function.name == "run_command"
+            });
+            if has_mutation {
+                consecutive_read_turns = 0;
+            } else {
+                consecutive_read_turns += 1;
+            }
+
             for call in &calls_vec {
+                tool_executions_count += 1;
                 let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
 
                 // Exécution de l'outil natif ultra-rapide
@@ -596,20 +669,37 @@ where
 
                 if let Some(diff) = tool_result.pending_diff {
                     let path = diff.path.clone();
+                    if !created_files.contains(&path) {
+                        created_files.push(path.clone());
+                    }
                     on_pending_diff(diff);
                     let notice = format!(
-                        "\n\n📝 **Proposition de modification pour `{}`** (aperçu diff généré, en attente de votre validation ci-contre)...\n\n",
+                        "\n\n📝 **Proposition de modification pour `{}`** (aperçu diff généré)...\n\n",
                         path
                     );
+                    accumulated_content.push_str(&notice);
                     on_chunk(&notice);
                 } else {
                     let notice = format!("\n\n⚙️ Outil exécuté : `{}`\n\n", call.function.name);
+                    accumulated_content.push_str(&notice);
                     on_chunk(&notice);
+                }
+
+                let mut content_to_send = tool_result.content;
+                if !has_mutation
+                    && consecutive_read_turns >= 2
+                    && (call.function.name == "read_file"
+                        || call.function.name == "list_directory"
+                        || call.function.name == "search_files")
+                {
+                    content_to_send.push_str(
+                        "\n\n⚠️ ALERTE : Tu as déjà inspecté plusieurs fichiers. Tu as désormais tout le contexte nécessaire. Arrête immédiatement les lectures et applique tes modifications avec `write_file` ou `edit_file` dès ce tour !",
+                    );
                 }
 
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
-                    content: Some(tool_result.content),
+                    content: Some(content_to_send),
                     tool_calls: None,
                     tool_call_id: Some(call.id.clone()),
                 });
@@ -618,13 +708,62 @@ where
         }
 
         if !full_content.trim().is_empty() {
-            return Ok(full_content);
+            let mut final_text = if !accumulated_content.trim().is_empty() && accumulated_content != full_content {
+                accumulated_content
+            } else {
+                full_content
+            };
+            if !created_files.is_empty() && !final_text.contains("Fichiers préparés pour le projet") {
+                let files_summary = format!(
+                    "\n\n📁 **Fichiers préparés pour le projet :**\n{}",
+                    created_files.iter().map(|f| format!("- `{}`", f)).collect::<Vec<_>>().join("\n")
+                );
+                final_text.push_str(&files_summary);
+            }
+            return Ok(final_text);
+        }
+
+        if tool_executions_count > 0 || !accumulated_content.trim().is_empty() {
+            let mut summary = if !accumulated_content.trim().is_empty() {
+                accumulated_content
+            } else {
+                "✅ Opérations terminées avec succès. Vous pouvez vérifier et valider les modifications ci-contre.".to_string()
+            };
+            if !created_files.is_empty() && !summary.contains("Fichiers préparés pour le projet") {
+                let files_summary = format!(
+                    "\n\n📁 **Fichiers préparés pour le projet :**\n{}",
+                    created_files.iter().map(|f| format!("- `{}`", f)).collect::<Vec<_>>().join("\n")
+                );
+                summary.push_str(&files_summary);
+            }
+            return Ok(summary);
         }
 
         return Err("L'API a renvoyé une réponse vide sans appel d'outil.".to_string());
     }
 
-    Err("Nombre maximum d'itérations atteint sans réponse finale du modèle.".to_string())
+    if tool_executions_count > 0 || !accumulated_content.trim().is_empty() {
+        let note = if created_files.is_empty() {
+            "\n\n*(L'analyse est terminée. Les fichiers ci-dessus ont été consultés. Vous pouvez demander d'appliquer les modifications ou d'écrire le code pour continuer.)*"
+        } else {
+            "\n\n*(Jalon d'exécution atteint : les étapes ci-dessus ont été préparées. Vous pouvez vérifier et valider les modifications ci-contre, ou envoyer un message pour continuer.)*"
+        };
+        let mut final_summary = if !accumulated_content.trim().is_empty() {
+            format!("{}{}", accumulated_content.trim(), note)
+        } else {
+            format!("✅ L'agent a traité {} étape(s).{}", tool_executions_count, note)
+        };
+        if !created_files.is_empty() && !final_summary.contains("Fichiers préparés pour le projet") {
+            let files_summary = format!(
+                "\n\n📁 **Fichiers préparés pour le projet :**\n{}",
+                created_files.iter().map(|f| format!("- `{}`", f)).collect::<Vec<_>>().join("\n")
+            );
+            final_summary.push_str(&files_summary);
+        }
+        Ok(final_summary)
+    } else {
+        Err("Nombre maximum d'itérations atteint sans réponse finale du modèle.".to_string())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
