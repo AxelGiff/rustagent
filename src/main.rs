@@ -646,7 +646,7 @@ fn create_editor_data(content: &str, language: Option<SupportedLanguage>) -> Cod
 fn app() -> impl IntoElement {
     // Load the external theme (colors) from theme.json and provide it to the
     // whole component tree. This is the app's "stylesheet": the single source
-    // of truth for the color palette. `c` is a shorthand for the color sheet.
+    let current_theme = use_state(|| theme::ThemePreset::ObsidianDark);
     let theme = use_provide_theme(theme::load_theme);
     let c = theme.read().colors.clone();
     let editor_a11y_id = use_a11y();
@@ -1562,6 +1562,28 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
                 .font_weight(FontWeight::BOLD),
         )
         .child(rect().width(Size::flex(1.)))
+        .child({
+            let active_preset = *current_theme.read();
+            let theme_state = theme;
+            let theme_items = theme::ThemePreset::ALL.iter().map({
+                let mut current_theme = current_theme;
+                move |&preset| {
+                    let is_sel = preset == active_preset;
+                    let mut theme_state = theme_state;
+                    MenuItem::new()
+                        .selected(is_sel)
+                        .on_press(move |_| {
+                            *current_theme.write() = preset;
+                            *theme_state.write() = preset.to_theme();
+                        })
+                        .child(format!("{} {}", preset.icon(), preset.name()))
+                }
+            });
+
+            Select::new()
+                .selected_item(format!("{} Thème", active_preset.icon()))
+                .children(theme_items)
+        })
         .child(
             Button::new()
                 .background(c.surface_tertiary)
