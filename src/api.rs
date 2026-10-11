@@ -391,8 +391,53 @@ pub async fn run_agent_loop(
     Err("Nombre maximum d'itérations atteint sans réponse".to_string())
 }
 
+/// Drapeau global d'annulation (bouton Stop).
+static CANCEL_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Demande l'arrêt de la génération en cours.
+pub fn request_cancel() {
+    CANCEL_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Réinitialise l'état d'annulation avant de démarrer une nouvelle génération.
+pub fn reset_cancel() {
+    CANCEL_FLAG.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn is_cancel_requested() -> bool {
+    CANCEL_FLAG.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn cancelled_summary(accumulated: &str) -> String {
+    let body = accumulated.trim();
+    if body.is_empty() {
+        "⏹ Génération interrompue.".to_string()
+    } else {
+        format!("{}\n\n⏹ *Génération interrompue par l'utilisateur.*", body)
+    }
+}
+
+/// Résume les arguments d'un appel d'outil pour l'affichage (chemin, commande, requête).
+fn describe_tool_call(name: &str, args: &Value) -> String {
+    let pick = |keys: &[&str]| -> String {
+        keys.iter()
+            .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect()
+    };
+    match name {
+        "read_file" | "write_file" | "edit_file" | "list_directory" => pick(&["path", "file"]),
+        "search_files" => pick(&["query"]),
+        "run_command" => pick(&["command"]),
+        _ => String::new(),
+    }
+}
+
 /// Boucle agentique multi-tours native supportant le streaming SSE, l'historique de conversation
 /// et la détection d'aperçus de diffs nécessitant validation utilisateur.
+/// Si `read_only` est vrai (mode Ask), seuls les outils de lecture sont exposés.
 pub async fn run_agent_loop_stream<C, D>(
     endpoint: &str,
     api_key: &str,
@@ -400,6 +445,7 @@ pub async fn run_agent_loop_stream<C, D>(
     system_prompt: &str,
     history: &[crate::Message],
     user_prompt: &str,
+    read_only: bool,
     mut on_chunk: C,
     mut on_pending_diff: D,
 ) -> Result<String, String>
@@ -407,11 +453,24 @@ where
     C: FnMut(&str),
     D: FnMut(crate::diff::PendingDiff),
 {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("Erreur client HTTP: {}", e))?;
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
 
-    let tools_payload = crate::tools::get_tool_definitions();
+    let tools_payload: Vec<Value> = crate::tools::get_tool_definitions()
+        .into_iter()
+        .filter(|t| {
+            !read_only
+                || matches!(
+                    t.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()),
+                    Some("read_file") | Some("list_directory") | Some("search_files")
+                )
+        })
+        .collect();
     let has_tools = !tools_payload.is_empty();
+    reset_cancel();
 
     let mut messages = vec![
         ChatMessage {
@@ -523,19 +582,40 @@ where
             "stream": true
         });
 
-        let res = client
-            .post(&url)
-            .bearer_auth(api_key)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| format!("Erreur réseau: {}", e))?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let err_text = res.text().await.unwrap_or_default();
-            return Err(format!("Erreur API (HTTP {}): {}", status, err_text));
-        }
+        // L'envoi de la requête est réessayé uniquement avant le début du streaming :
+        // aucun outil n'a alors été exécuté pour ce tour, donc pas de risque de doublon.
+        let mut attempt: u32 = 0;
+        let res = loop {
+            if is_cancel_requested() {
+                break None;
+            }
+            let sent = client.post(&url).bearer_auth(api_key).json(&req).send().await;
+            match sent {
+                Ok(r) if r.status().is_success() => break Some(r),
+                Ok(r) => {
+                    let status = r.status();
+                    let transient = status.as_u16() == 429 || status.is_server_error();
+                    if transient && attempt + 1 < MAX_ATTEMPTS {
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    let err_text = r.text().await.unwrap_or_default();
+                    return Err(format!("Erreur API (HTTP {}): {}", status, err_text));
+                }
+                Err(e) => {
+                    if attempt + 1 < MAX_ATTEMPTS {
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(format!("Erreur réseau: {}", e));
+                }
+            }
+        };
+        let Some(res) = res else {
+            return Ok(cancelled_summary(&accumulated_content));
+        };
 
         let mut stream = res.bytes_stream();
         let mut buffer = String::new();
@@ -544,7 +624,15 @@ where
         let mut tool_calls_map: std::collections::BTreeMap<usize, (String, String, String)> =
             std::collections::BTreeMap::new();
 
-        while let Some(chunk_res) = stream.next().await {
+        loop {
+            if is_cancel_requested() {
+                accumulated_content.push_str(&full_content);
+                return Ok(cancelled_summary(&accumulated_content));
+            }
+            let next = tokio::time::timeout(Duration::from_secs(90), stream.next())
+                .await
+                .map_err(|_| "Le modèle n'a rien renvoyé depuis 90 s (timeout du flux).".to_string())?;
+            let Some(chunk_res) = next else { break };
             let bytes = chunk_res.map_err(|e| e.to_string())?;
             byte_buffer.extend_from_slice(&bytes);
 
@@ -661,11 +749,19 @@ where
             }
 
             for call in &calls_vec {
+                if is_cancel_requested() {
+                    return Ok(cancelled_summary(&accumulated_content));
+                }
                 tool_executions_count += 1;
                 let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| json!({}));
+                let detail = describe_tool_call(&call.function.name, &args);
 
                 // Exécution de l'outil natif ultra-rapide
+                let started = std::time::Instant::now();
                 let tool_result = crate::tools::execute_native_tool(&call.function.name, args).await;
+                let elapsed_ms = started.elapsed().as_millis();
+                let failed = tool_result.content.starts_with("Erreur");
+                let status_icon = if failed { "❌" } else { "✅" };
 
                 if let Some(diff) = tool_result.pending_diff {
                     let path = diff.path.clone();
@@ -674,19 +770,26 @@ where
                     }
                     on_pending_diff(diff);
                     let notice = format!(
-                        "\n\n📝 **Proposition de modification pour `{}`** (aperçu diff généré)...\n\n",
-                        path
+                        "\n\n📝 `{}` · `{}` — diff prêt à valider ({} ms)\n\n",
+                        call.function.name, path, elapsed_ms
                     );
                     accumulated_content.push_str(&notice);
                     on_chunk(&notice);
                 } else {
-                    let notice = format!("\n\n⚙️ Outil exécuté : `{}`\n\n", call.function.name);
+                    let notice = format!(
+                        "\n\n⚙️ `{}` {} {} — {} ms\n\n",
+                        call.function.name,
+                        if detail.is_empty() { String::new() } else { format!("`{}`", detail) },
+                        status_icon,
+                        elapsed_ms
+                    );
                     accumulated_content.push_str(&notice);
                     on_chunk(&notice);
                 }
 
                 let mut content_to_send = tool_result.content;
                 if !has_mutation
+                    && !read_only
                     && consecutive_read_turns >= 2
                     && (call.function.name == "read_file"
                         || call.function.name == "list_directory"
@@ -694,6 +797,10 @@ where
                 {
                     content_to_send.push_str(
                         "\n\n⚠️ ALERTE : Tu as déjà inspecté plusieurs fichiers. Tu as désormais tout le contexte nécessaire. Arrête immédiatement les lectures et applique tes modifications avec `write_file` ou `edit_file` dès ce tour !",
+                    );
+                } else if read_only && consecutive_read_turns >= 2 {
+                    content_to_send.push_str(
+                        "\n\n⚠️ Mode lecture seule : tu as assez d'informations, réponds maintenant à la question par une synthèse.",
                     );
                 }
 
