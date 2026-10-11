@@ -193,29 +193,36 @@ impl SupportedLanguage {
         }
     }
 
-    /// Detect the language from a user message. Looks for common language
-    /// names and aliases. Defaults to Python.
+    /// Detect the language from a user message. Uses token/word matching
+    /// to avoid false positives (e.g. "users", "first", "ajs"). Defaults to Python.
     fn detect(message: &str) -> SupportedLanguage {
         let lower = message.to_lowercase();
-        let contains = |keywords: &[&str]| keywords.iter().any(|k| lower.contains(k));
+        // Split by non-alphanumeric (except '+' and '#') to get clean tokens
+        let words: Vec<&str> = lower
+            .split(|c: char| !c.is_alphanumeric() && c != '+' && c != '#')
+            .filter(|s| !s.is_empty())
+            .collect();
 
-        if contains(&["javascript", "js", "node"]) {
+        let has_word = |target: &str| words.iter().any(|&w| w == target);
+        let has_any = |targets: &[&str]| targets.iter().any(|&t| has_word(t));
+
+        if has_any(&["javascript", "js", "node", "nodejs"]) {
             SupportedLanguage::JavaScript
-        } else if contains(&["typescript", "tsx", "ts "]) {
+        } else if has_any(&["typescript", "ts", "tsx"]) {
             SupportedLanguage::TypeScript
-        } else if contains(&["html"]) {
+        } else if has_any(&["html", "htm"]) {
             SupportedLanguage::Html
-        } else if contains(&["css"]) {
+        } else if has_any(&["css", "scss", "sass"]) {
             SupportedLanguage::Css
-        } else if contains(&["c++", "cpp", "cplusplus"]) {
+        } else if has_any(&["c++", "cpp", "cplusplus"]) {
             SupportedLanguage::Cpp
-        } else if contains(&["golang", "go "]) {
+        } else if has_any(&["golang", "go"]) {
             SupportedLanguage::Go
-        } else if contains(&["java"]) {
+        } else if has_any(&["java"]) {
             SupportedLanguage::Java
-        } else if contains(&["rust", "rs"]) {
+        } else if has_any(&["rust", "rs"]) {
             SupportedLanguage::Rust
-        } else if contains(&["c "]) {
+        } else if has_word("c") {
             SupportedLanguage::C
         } else {
             // Default to Python for anything else (including "python").
@@ -675,6 +682,8 @@ fn app() -> impl IntoElement {
     let expanded_dirs = use_state(std::collections::HashSet::<std::path::PathBuf>::new);
     let pending_diffs = use_state(Vec::<diff::PendingDiff>::new);
     let center_view_mode = use_state(|| CenterViewMode::Editor);
+    let is_generating = use_state(|| false);
+    let is_ask_mode = use_state(|| false);
 
     // Whether the settings panel is open.
     let show_settings = use_state(|| false);
@@ -982,6 +991,8 @@ if __name__ == "__main__":
         let mut file_name = file_name;
         let pending_diffs = pending_diffs;
         let center_view_mode = center_view_mode;
+        let mut is_generating = is_generating;
+        let is_ask_mode = is_ask_mode;
         move |user_message: String| {
             if !should_send_message(&user_message) {
                 return;
@@ -1013,10 +1024,15 @@ if __name__ == "__main__":
                 return;
             }
 
+            api::reset_cancel();
+            *is_generating.write() = true;
+
             let history_snapshot = messages.read().clone();
             let mut pending_diffs_stream = pending_diffs;
             let mut center_view_mode_stream = center_view_mode;
             let mut messages_stream = messages;
+            let mut is_generating_stream = is_generating;
+            let read_only_mode = *is_ask_mode.read();
 
             spawn(async move {
                 let api_key_config = config::ApiKeyConfig::load();
@@ -1025,6 +1041,7 @@ if __name__ == "__main__":
                         role: Role::AI,
                         content: format!("⚠️ {}\n\nPlease configure your API key and try again.", msg),
                     });
+                    *is_generating_stream.write() = false;
                     return;
                 }
 
@@ -1117,6 +1134,7 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
                             &system_prompt,
                             &history,
                             &user_msg,
+                            read_only_mode,
                             |chunk| {
                                 if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
                                     msg.content.push_str(chunk);
@@ -1131,6 +1149,8 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
                     }
                 })
                 .await;
+
+                *is_generating_stream.write() = false;
 
                 match result {
                     Ok(response) => {
@@ -1412,6 +1432,32 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
         })
         .child(if is_models_loading { "⟳ ..." } else { "⟳" });
 
+    let is_generating_val = *is_generating.read();
+    let is_ask_val = *is_ask_mode.read();
+
+    let stop_button = Button::new()
+        .background(Color::from_rgb(220, 38, 38))
+        .hover_background(Color::from_rgb(185, 28, 28))
+        .border_fill(Color::TRANSPARENT)
+        .color(Color::WHITE)
+        .on_press(|_| {
+            api::request_cancel();
+        })
+        .child("⏹ Arrêter");
+
+    let mode_toggle_button = {
+        let mut is_ask_mode = is_ask_mode;
+        Button::new()
+            .background(if is_ask_val { Color::from_rgb(59, 130, 246) } else { c.surface_tertiary })
+            .hover_background(if is_ask_val { Color::from_rgb(37, 99, 235) } else { c.tertiary })
+            .border_fill(Color::TRANSPARENT)
+            .color(if is_ask_val { Color::WHITE } else { c.text_primary })
+            .on_press(move |_| {
+                *is_ask_mode.write() = !is_ask_val;
+            })
+            .child(if is_ask_val { "💬 Mode Ask" } else { "🛠️ Mode Edit" })
+    };
+
     // Input area with text input and model selector bar
     let input_area = rect()
         .width(Size::fill())
@@ -1427,7 +1473,7 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
         .spacing(8.)
         .content(Content::Flex)
         .child(
-            // Row 1: Chat input and send button
+            // Row 1: Chat input and send/stop button
             rect()
                 .width(Size::fill())
                 .height(Size::px(38.))
@@ -1441,22 +1487,25 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
                         .focus_background(c.tertiary)
                         .border_fill(Color::TRANSPARENT)
                         .color(c.text_secondary)
-                        .placeholder("Poser une question ou demander une action...")
+                        .placeholder(if is_ask_val { "Poser une question (lecture seule)..." } else { "Demander une modification ou création de code..." })
                         .width(Size::flex(1.))
                         .on_submit(on_submit),
                 )
-                .child(
+                .child(if is_generating_val {
+                    stop_button.into_element()
+                } else {
                     Button::new()
                         .background(c.surface_tertiary)
                         .hover_background(c.tertiary)
                         .border_fill(Color::TRANSPARENT)
                         .color(c.text_secondary)
                         .on_press(send_message)
-                        .child("Envoyer"),
-                ),
+                        .child("Envoyer")
+                        .into_element()
+                }),
         )
         .child(
-            // Row 2: Model select dropdown, refresh button and context label
+            // Row 2: Model select dropdown, refresh button, mode toggle and context label
             rect()
                 .width(Size::fill())
                 .height(Size::px(32.))
@@ -1466,6 +1515,7 @@ DIRECTIVES STRICTES D'AUTONOMIE ET DE CONTEXTE :
                 .content(Content::Flex)
                 .child(model_select)
                 .child(refresh_models_button)
+                .child(mode_toggle_button)
                 .child(
                     rect()
                         .width(Size::flex(1.))

@@ -355,6 +355,15 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                     pending_diff: None,
                 };
             }
+            if let Some(reason) = dangerous_command_reason(cmd_str) {
+                return ToolResult {
+                    content: format!(
+                        "Erreur: commande refusée par les garde-fous ({}). Propose une alternative plus sûre ou demande à l'utilisateur de l'exécuter lui-même.",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
 
             let output = run_shell_command(cmd_str, cwd_str).await;
             ToolResult {
@@ -455,6 +464,39 @@ pub fn truncate_output(text: &str, max_lines: usize, max_chars: usize) -> String
     }
 }
 
+/// Retourne la raison du refus si la commande est manifestement destructrice.
+pub fn dangerous_command_reason(cmd: &str) -> Option<&'static str> {
+    let lower = cmd.to_lowercase();
+    let patterns: [(&str, &str); 14] = [
+        ("rm -rf /", "suppression récursive de la racine"),
+        ("rm -rf ~", "suppression récursive du dossier personnel"),
+        ("rm -rf *", "suppression récursive globale"),
+        ("del /s", "suppression récursive Windows"),
+        ("rd /s", "suppression récursive Windows"),
+        ("rmdir /s", "suppression récursive Windows"),
+        ("remove-item -recurse", "suppression récursive PowerShell"),
+        ("format c:", "formatage de disque"),
+        ("mkfs", "formatage de disque"),
+        ("shutdown", "arrêt de la machine"),
+        ("reboot", "redémarrage de la machine"),
+        ("git push --force", "réécriture de l'historique distant"),
+        ("git reset --hard", "perte de modifications locales"),
+        (":(){", "fork bomb"),
+    ];
+    patterns.iter().find(|(p, _)| lower.contains(p)).map(|(_, why)| *why)
+}
+
+/// Durée maximale d'une commande : plus longue pour les installations/builds.
+fn command_timeout(cmd: &str) -> std::time::Duration {
+    let lower = cmd.to_lowercase();
+    let slow = ["install", "build", "npm", "pip", "cargo", "npx", "startproject", "startapp", "migrate", "create"];
+    if slow.iter().any(|k| lower.contains(k)) {
+        std::time::Duration::from_secs(180)
+    } else {
+        std::time::Duration::from_secs(30)
+    }
+}
+
 /// Executes a shell command with a timeout, optionally within a working directory.
 async fn run_shell_command(cmd: &str, cwd: Option<&str>) -> String {
     let mut command = if cfg!(target_os = "windows") {
@@ -477,7 +519,9 @@ async fn run_shell_command(cmd: &str, cwd: Option<&str>) -> String {
         }
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await {
+    command.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let limit = command_timeout(cmd);
+    match tokio::time::timeout(limit, command.output()).await {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -492,13 +536,21 @@ async fn run_shell_command(cmd: &str, cwd: Option<&str>) -> String {
             )
         }
         Ok(Err(e)) => format!("Erreur lors de l'exécution de la commande: {}", e),
-        Err(_) => "Délai d'exécution dépassé (timeout 30s).".to_string(),
+        Err(_) => format!("Délai d'exécution dépassé (timeout {}s).", limit.as_secs()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_dangerous_commands_blocked() {
+        assert!(dangerous_command_reason("rm -rf /").is_some());
+        assert!(dangerous_command_reason("git reset --hard HEAD").is_some());
+        assert!(dangerous_command_reason("cargo test").is_none());
+        assert!(dangerous_command_reason("pip install django").is_none());
+    }
 
     #[test]
     fn test_truncate_output() {
