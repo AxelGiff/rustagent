@@ -28,12 +28,14 @@ pub fn build_active_context(pending_diffs: &[diff::PendingDiff], history: &[Mess
         let mut recent_paths = Vec::new();
         for msg in history.iter().rev().take(8) {
             for line in msg.content.lines() {
-                if let Some(pos) = line.find("- `") {
-                    if let Some(end) = line[pos + 3..].find('`') {
-                        let p = &line[pos + 3..pos + 3 + end];
-                        if !recent_paths.contains(&p.to_string()) && (p.contains('/') || p.contains('\\')) {
-                            recent_paths.push(p.to_string());
-                        }
+                if let Some(pos) = line.find("- `")
+                    && let Some(end) = line[pos + 3..].find('`')
+                {
+                    let p = &line[pos + 3..pos + 3 + end];
+                    if !recent_paths.contains(&p.to_string())
+                        && (p.contains('/') || p.contains('\\'))
+                    {
+                        recent_paths.push(p.to_string());
                     }
                 }
             }
@@ -41,7 +43,11 @@ pub fn build_active_context(pending_diffs: &[diff::PendingDiff], history: &[Mess
         if !recent_paths.is_empty() {
             format!(
                 "\n\n[CONTEXTE DU SOUS-PROJET EN COURS]\nFichiers récemment manipulés :\n{}\nIMPORTANT : L'utilisateur poursuit le travail sur ce sous-projet. Reste impérativement dans ce sous-dossier et n'explore pas la racine de l'agent !",
-                recent_paths.iter().map(|p| format!("- `{}`", p)).collect::<Vec<_>>().join("\n")
+                recent_paths
+                    .iter()
+                    .map(|p| format!("- `{}`", p))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             )
         } else {
             String::new()
@@ -95,8 +101,13 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
 - CRÉATION DE PROJET COMPLET EN UN SEUL APPEL : Pour une application ou un projet complet (ex: index.html, style.css, script.js, composants), utilise le paramètre `files` de `write_file` pour générer TOUS les fichiers d'un coup :
   `write_file(files: [{{ \"path\": \"dossier/index.html\", \"content\": \"...code complet...\" }}, {{ \"path\": \"dossier/style.css\", \"content\": \"...code complet...\" }}, {{ \"path\": \"dossier/app.js\", \"content\": \"...code complet...\" }}])`.
   Si un seul fichier est nécessaire : `write_file(path: \"...\", content: \"...\")`.
+- ⚠️ BUDGET DE SORTIE LIMITÉ : si les fichiers sont longs (ex : app Three.js avec index.html + style.css + app.js de plusieurs centaines de lignes), n'utilise PAS `files` en un seul appel — écris UN SEUL fichier par appel `write_file`, en commençant par le plus important. Un appel trop gros dépasse la limite de tokens, la réponse est tronquée et tes arguments arrivent vides (erreur \\\"argument 'path' manquant\\\").
 - RÈGLE D'AUTONOMIE TOTALE : Ne laisse aucun fichier manquant, aucun placeholder de type \"[À compléter]\", et n'interromps pas la génération. L'application créée doit être 100% exécutable, belle et directement fonctionnelle.
-- RÈGLE ABSOLUE : Tu dois TOUJOURS inclure le code source COMPLET dans chaque argument \"content\". N'appelle JAMAIS `write_file` avec des arguments vides !{}{}{}",
+- RÈGLE ABSOLUE : Tu dois TOUJOURS inclure le code source COMPLET dans chaque argument \"content\". N'appelle JAMAIS `write_file` avec des arguments vides !
+3. VÉRIFICATION ET CORRECTION AUTOMATIQUE (OBLIGATOIRE) :
+- Dès que tous les fichiers du projet sont écrits, appelle `verify_project` (ex: `{{ \"cwd\": \"Pictures/montage-pc\" }}`) : il compile/teste le projet sur une COPIE TEMPORAIRE (le projet réel n'est PAS modifié).
+- Lis attentivement les erreurs renvoyées (section STDERR), corrige les fichiers concernés avec `edit_file` (ou `write_file`), puis rappelle `verify_project`.
+- Répète jusqu'à obtenir `🔎 Vérification OK ✅` (3 cycles maximum). Ne termine JAMAIS en laissant une erreur de compilation sans l'avoir corrigée ou expliquée.{}{}{}",
             if already_answered_specs {
                 "SPÉCIFICATIONS DÉJÀ VALIDÉES (`plan.md` déjà créé) -> Appelle IMMÉDIATEMENT `write_file` avec le code complet dès ce tour !"
             } else {
@@ -113,9 +124,11 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
 DIRECTIVES DU MODE QUICK EDIT (EXÉCUTION RAPIDE ET COMPLÈTE) :
 1. CRÉATION OU MODIFICATION DIRECTE :
 - Agis IMMÉDIATEMENT en appelant l'outil natif `write_file` :
-  * Si plusieurs fichiers pour un projet complet : utilise `files: [{{ \"path\": \"...\", \"content\": \"...\" }}, ...]` pour créer tous les fichiers d'un coup.
+  * Si plusieurs PETITS fichiers pour un projet complet : utilise `files: [{{ \"path\": \"...\", \"content\": \"...\" }}, ...]` pour créer tous les fichiers d'un coup.
+  * Si les fichiers sont longs (projet volumineux) : écris UN SEUL fichier par appel `write_file` — sinon la réponse dépasse la limite de tokens, est tronquée, et les arguments sont perdus.
   * Si un seul fichier : `write_file(path: \"...\", content: \"...code complet...\")` ou `edit_file` pour une modification ciblée.
 - RÈGLE D'AUTONOMIE : Fournis toujours le code complet sans placeholder afin que le projet fonctionne immédiatement.
+- VÉRIFICATION : Après avoir écrit ou modifié du code, appelle `verify_project` (ex: `{{ \"cwd\": \"<dossier du projet>\" }}`) pour compiler/tester sur une copie temporaire, et corrige les erreurs signalées avant de conclure.
 2. REDIRECTION VERS MODE SPEC (UNIQUEMENT SI ARCHITECTURE COMPLEXE NON SPÉCIFIÉE) :
 - Si l'utilisateur demande une grosse fonctionnalité d'architecture/sécurité floue (> 3 fichiers, auth/permissions complexes) et qu'aucun `plan.md` n'existe : explique en 2 phrases les enjeux Security by Design et termine par `[RECOMMEND_SPEC_MODE]`.{}{}{}",
             env_context,
@@ -200,6 +213,7 @@ pub fn extract_fallback_diffs(
 }
 
 /// Orchestrates an entire LLM agent turn: builds contexts, streams output, runs tools and fallbacks.
+#[allow(clippy::too_many_arguments)] // an agent turn legitimately needs this much context
 pub async fn run_agent_turn(
     user_message: String,
     spec_mode: bool,
@@ -210,18 +224,30 @@ pub async fn run_agent_turn(
     wants_code: bool,
     detected_language: SupportedLanguage,
     mut on_chunk: impl FnMut(&str),
-    mut on_tool_diff: impl FnMut(diff::PendingDiff),
+    on_tool_diff: impl FnMut(diff::PendingDiff),
 ) -> Result<(String, Vec<diff::PendingDiff>), String> {
     let api_key_config = config::ApiKeyConfig::load();
     if let Err(msg) = api_key_config.validate() {
-        return Err(format!("⚠️ {}\n\nPlease configure your API key and try again.", msg));
+        return Err(format!(
+            "⚠️ {}\n\nPlease configure your API key and try again.",
+            msg
+        ));
     }
 
-    let endpoint = api_key_config.endpoint.clone().unwrap_or_else(|| ALBERT_ENDPOINT.to_string());
-    let model = api_key_config.model.clone().unwrap_or_else(|| ALBERT_MODEL.to_string());
+    let endpoint = api_key_config
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| ALBERT_ENDPOINT.to_string());
+    let model = api_key_config
+        .model
+        .clone()
+        .unwrap_or_else(|| ALBERT_MODEL.to_string());
     let api_key = api_key_config.key.clone();
 
-    println!("[DEBUG] Prompt envoyé (spec_mode={}) : {}", spec_mode, user_message);
+    println!(
+        "[DEBUG] Prompt envoyé (spec_mode={}) : {}",
+        spec_mode, user_message
+    );
 
     let active_context = build_active_context(&pending_diffs, &history);
     let history_texts: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
@@ -237,21 +263,49 @@ pub async fn run_agent_turn(
         || lower_prompt.contains("creer un")
         || lower_prompt.contains("génère")
         || lower_prompt.contains("genere")
-        || history.iter().rev().take(4).any(|m| m.content.contains("SPEC_QUESTIONS_JSON:"));
+        || history
+            .iter()
+            .rev()
+            .take(4)
+            .any(|m| m.content.contains("SPEC_QUESTIONS_JSON:"));
 
-    if let Some(plan_file) = tools::write_auto_plan(&user_message, &history_texts) {
+    // `write_auto_plan` écrit sur disque : exécuté hors du runtime async.
+    let plan_file = {
+        let message = user_message.clone();
+        let history_texts = history_texts.clone();
+        tokio::task::spawn_blocking(move || tools::write_auto_plan(&message, &history_texts))
+            .await
+            .unwrap_or(None)
+    };
+    if let Some(plan_file) = plan_file {
         on_chunk(&format!(
             "🛡️ `write_plan` · `{}` ✅ — 0 ms (ajouté automatiquement au `.gitignore`)\n",
             plan_file
         ));
     }
 
-    let project_snapshot = tools::detect_project_snapshot(&user_message, &history_texts);
-    let env_context = build_env_context(&current_editor_code, &current_editor_file, &project_snapshot);
+    // `detect_project_snapshot` parcourt récursivement le disque : hors runtime async.
+    let project_snapshot = {
+        let message = user_message.clone();
+        let history_texts = history_texts.clone();
+        tokio::task::spawn_blocking(move || {
+            tools::detect_project_snapshot(&message, &history_texts)
+        })
+        .await
+        .unwrap_or_default()
+    };
+    let env_context = build_env_context(
+        &current_editor_code,
+        &current_editor_file,
+        &project_snapshot,
+    );
 
-    let plan_context = if let Ok(plan_text) = std::fs::read_to_string("plan.md") {
+    let plan_context = if let Ok(plan_text) = tokio::fs::read_to_string("plan.md").await {
         let truncated = tools::truncate_output(&plan_text, 25, 1200);
-        format!("\n\n[PLAN DE LA FONCTIONNALITÉ PRÉVUE (`plan.md`)]\n{}", truncated)
+        format!(
+            "\n\n[PLAN DE LA FONCTIONNALITÉ PRÉVUE (`plan.md`)]\n{}",
+            truncated
+        )
     } else {
         String::new()
     };
@@ -273,7 +327,7 @@ pub async fn run_agent_turn(
         &user_message,
         spec_mode,
         |chunk| on_chunk(chunk),
-        |diff| on_tool_diff(diff),
+        on_tool_diff,
     )
     .await;
 
@@ -285,20 +339,28 @@ pub async fn run_agent_turn(
             {
                 Ok((response, Vec::new()))
             } else {
-                let (fallback_resp, new_diffs) = extract_fallback_diffs(
-                    &response,
-                    &user_message,
-                    &current_editor_file,
-                    wants_code,
-                    detected_language,
-                );
+                // L'extraction lit des fichiers sur disque : hors runtime async.
+                let (fallback_resp, new_diffs) = tokio::task::spawn_blocking(move || {
+                    extract_fallback_diffs(
+                        &response,
+                        &user_message,
+                        &current_editor_file,
+                        wants_code,
+                        detected_language,
+                    )
+                })
+                .await
+                .map_err(|e| format!("Erreur interne (extraction des diffs): {}", e))?;
                 Ok((fallback_resp, new_diffs))
             }
         }
         Err(raw_error) => {
             let category = api::classify_error(&raw_error);
-            Err(format!("{}\n\nDetails: {}", category.user_message(), raw_error))
+            Err(format!(
+                "{}\n\nDetails: {}",
+                category.user_message(),
+                raw_error
+            ))
         }
     }
 }
-

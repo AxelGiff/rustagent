@@ -1,0 +1,465 @@
+:root {
+  --purple: #6a1f8c;
+  --purple-dark: #4a1263;
+  --purple-light: #9b4fc4;
+  --mauve: #d8b4ff;
+  --black: #1a1a2e;
+  --white: #ffffff;
+  --gold: #ffd700;
+  --danger: #e74c3c;
+  --success: #2ecc71;
+  --bg: #f0e6ff;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #6a1f8c, #3a0e54);
+  min-height: 100vh;
+  color: var(--black);
+}
+
+#bmc-app {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 20px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ===== HEADER ===== */
+.app-header {
+  text-align: center;
+  padding: 24px 0;
+  color: var(--white);
+}
+
+.app-header h1 {
+  font-size: 2.6rem;
+  text-shadow: 2px 2px 0 rgba(0,0,0,0.3);
+}
+
+.tagline {
+  font-size: 1rem;
+  opacity: 0.9;
+  margin-top: 6px;
+}
+
+/* ===== BOUTONS ===== */
+.btn-primary {
+  background: var(--gold);
+  color: var(--black);
+  border: none;
+  padding: 14px 28px;
+  font-size: 1.1rem;
+  font-weight: bold;
+  border-radius: 50px;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+.btn-primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+}
+
+.btn-quit {
+  background: transparent;
+  color: var(--white);
+  border: 2px solid var(--mauve);
+  padding: 8px 16px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background 0.2s;
+}
+
+.btn-quit:hover {
+  background: rgba(255,255,255,0.15);
+}
+
+/* ===== ÉCRAN SETUP ===== */
+.setup-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.setup-card {
+  background: var(--white);
+  border-radius: 24px;
+  padding: 36px;
+  width: 100%;
+  max-width: 520px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+}
+
+.setup-card h2 {
+  color: var(--purple);
+  margin-bottom: 20px;
+  text-align: center;
+}
+
+.players-input h3,
+.settings-row {
+  color: var(--purple-dark);
+  margin-bottom: 12px;
+}
+
+.player-input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.player-num {
+  background: var(--purple);
+  color: var(--white);
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.player-input-row input,
+.settings-row input {
+  flex: 1;
+  padding: 12px;
+  border: 2px solid var(--mauve);
+  border-radius: 10px;
+  font-size: 1rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.player-input-row input:focus,
+.settings-row input:focus {
+  border-color: var(--purple);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.settings-row input {
+  flex: 0 0 80px;
+}
+
+.setup-card .btn-primary {
+  width: 100%;
+  margin-top: 24px;
+}
+
+/* ===== ÉCRAN DE JEU ===== */
+.game-screen {
+  flex: 1;
+  background: var(--white);
+  border-radius: 24px;
+  padding: 24px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+}
+
+.game-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.round-info {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.badge,
+.judge-badge {
+  background: var(--purple-light);
+  color: var(--white);
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 0.9rem;
+  font-weight: bold;
+}
+
+.judge-badge {
+  background: var(--gold);
+  color: var(--black);
+}
+
+/* Scores */
+.scores-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.score-chip {
+  background: var(--bg);
+  border-radius: 20px;
+  padding: 8px 16px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: bold;
+}
+
+.score-chip.judge {
+  background: var(--gold);
+}
+
+.score-val {
+  color: var(--purple);
+}
+
+/* Carte noire */
+.black-card-zone {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 28px;
+}
+
+.black-card {
+  background: var(--black);
+  color: var(--white);
+  border-radius: 16px;
+  padding: 28px;
+  max-width: 480px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+  position: relative;
+}
+
+.black-card p {
+  font-size: 1.4rem;
+  font-weight: bold;
+  line-height: 1.4;
+  margin-bottom: 16px;
+}
+
+.card-category {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  background: var(--gold);
+  color: var(--black);
+  font-size: 0.75rem;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-weight: bold;
+}
+
+.blank-line {
+  display: block;
+  height: 4px;
+  background: var(--mauve);
+  border-radius: 4px;
+  margin: 8px auto;
+  width: 60%;
+}
+
+/* Phase réponse */
+.phase-answer h3,
+.phase-reveal h3 {
+  color: var(--purple-dark);
+  text-align: center;
+  margin-bottom: 20px;
+}
+
+.player-turn {
+  margin-bottom: 24px;
+}
+
+.turn-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  font-size: 1.1rem;
+}
+
+.ready-tag {
+  color: var(--success);
+  font-weight: bold;
+}
+
+/* Mains de cartes */
+.hand {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.white-card {
+  background: var(--white);
+  border: 2px solid var(--mauve);
+  color: var(--black);
+  border-radius: 12px;
+  padding: 14px;
+  min-width: 140px;
+  flex: 1 1 140px;
+  font-size: 0.95rem;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s;
+}
+
+.white-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--purple);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.2);
+}
+
+/* Continuer */
+.continue-hint {
+  text-align: center;
+  padding: 16px;
+  border: 2px dashed var(--gold);
+  border-radius: 16px;
+  margin-top: 20px;
+}
+
+.continue-hint p {
+  margin-bottom: 12px;
+  color: var(--purple-dark);
+  font-weight: bold;
+}
+
+/* Phase révélation */
+.reveal-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  justify-content: center;
+}
+
+.reveal-card {
+  background: var(--bg);
+  border: 2px solid var(--mauve);
+  border-radius: 16px;
+  padding: 20px;
+  width: 220px;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.reveal-card:hover {
+  transform: translateY(-4px);
+  border-color: var(--gold);
+}
+
+.reveal-anon {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--purple);
+  font-weight: bold;
+  margin-bottom: 10px;
+}
+
+.reveal-card p {
+  font-size: 1rem;
+}
+
+/* Résultat */
+.phase-result {
+  text-align: center;
+  padding: 30px;
+}
+
+.trophy {
+  font-size: 4rem;
+}
+
+.result-banner h2 {
+  color: var(--purple);
+  margin: 16px 0 8px;
+}
+
+.result-actions {
+  margin-top: 24px;
+}
+
+/* ===== ÉCRAN FIN ===== */
+.end-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.end-card {
+  background: var(--white);
+  border-radius: 24px;
+  padding: 36px;
+  max-width: 480px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+}
+
+.end-card h2 {
+  color: var(--purple);
+  margin-bottom: 24px;
+}
+
+.final-ranking {
+  list-style: none;
+  margin-bottom: 28px;
+  text-align: left;
+}
+
+.final-ranking li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  margin-bottom: 8px;
+  background: var(--bg);
+}
+
+.final-ranking li:first-child {
+  background: var(--gold);
+}
+
+.rank {
+  background: var(--purple);
+  color: var(--white);
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: bold;
+  flex-shrink: 0;
+}
+
+.rank-name {
+  flex: 1;
+  font-weight: bold;
+}
+
+.rank-score {
+  color: var(--purple);
+  font-weight: bold;
+}

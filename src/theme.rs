@@ -152,10 +152,10 @@ fn fallback_colors() -> ColorsSheet {
 /// then the `src/` directory.
 fn read_raw_theme() -> Option<RawTheme> {
     for candidate in [Path::new("theme.json"), Path::new("src/theme.json")] {
-        if let Ok(text) = std::fs::read_to_string(candidate) {
-            if let Ok(raw) = serde_json::from_str::<RawTheme>(&text) {
-                return Some(raw);
-            }
+        if let Ok(text) = std::fs::read_to_string(candidate)
+            && let Ok(raw) = serde_json::from_str::<RawTheme>(&text)
+        {
+            return Some(raw);
         }
     }
     None
@@ -208,7 +208,7 @@ impl ThemePreset {
         }
     }
 
-    pub fn to_theme(&self) -> Theme {
+    pub fn to_theme(self) -> Theme {
         let colors = match self {
             ThemePreset::ObsidianDark => match read_raw_theme() {
                 Some(raw) => raw.colors.to_colors_sheet(),
@@ -216,21 +216,21 @@ impl ThemePreset {
             },
             // Tokyo Night: Subtle, modern dark slate with refined indigo/cyan accents
             ThemePreset::TokyoNight => ColorsSheet {
-                primary: Color::from_rgb(122, 162, 247),       // Crisp blue accent
-                secondary: Color::from_rgb(187, 154, 247),     // Lavender
-                tertiary: Color::from_rgb(41, 46, 66),         // Subtle dark slate
+                primary: Color::from_rgb(122, 162, 247), // Crisp blue accent
+                secondary: Color::from_rgb(187, 154, 247), // Lavender
+                tertiary: Color::from_rgb(41, 46, 66),   // Subtle dark slate
                 success: Color::from_rgb(158, 206, 106),
                 warning: Color::from_rgb(224, 175, 104),
                 error: Color::from_rgb(247, 118, 142),
                 info: Color::from_rgb(122, 162, 247),
-                background: Color::from_rgb(26, 27, 38),       // Clean dark background
-                surface_primary: Color::from_rgb(31, 35, 53),  // Panels
+                background: Color::from_rgb(26, 27, 38), // Clean dark background
+                surface_primary: Color::from_rgb(31, 35, 53), // Panels
                 surface_secondary: Color::from_rgb(22, 22, 30),
                 surface_tertiary: Color::from_rgb(41, 46, 66), // Hover / cards
                 surface_inverse: Color::from_rgb(52, 59, 88),  // User message bubble
                 surface_inverse_secondary: Color::from_rgb(29, 32, 48), // AI bubble
                 surface_inverse_tertiary: Color::from_rgb(65, 72, 104),
-                border: Color::from_rgb(44, 49, 70),          // Subtle border
+                border: Color::from_rgb(44, 49, 70), // Subtle border
                 border_focus: Color::from_rgb(122, 162, 247),
                 border_disabled: Color::from_rgb(38, 42, 60),
                 text_primary: Color::from_rgb(192, 202, 245),
@@ -246,21 +246,21 @@ impl ThemePreset {
             },
             // Catppuccin Mocha: Balanced warm dark palette loved by developers
             ThemePreset::CatppuccinMocha => ColorsSheet {
-                primary: Color::from_rgb(137, 180, 250),       // Blue accent
-                secondary: Color::from_rgb(203, 166, 247),     // Mauve
-                tertiary: Color::from_rgb(49, 50, 68),         // Surface0
+                primary: Color::from_rgb(137, 180, 250),   // Blue accent
+                secondary: Color::from_rgb(203, 166, 247), // Mauve
+                tertiary: Color::from_rgb(49, 50, 68),     // Surface0
                 success: Color::from_rgb(166, 227, 161),
                 warning: Color::from_rgb(249, 226, 175),
                 error: Color::from_rgb(243, 139, 168),
                 info: Color::from_rgb(137, 220, 235),
-                background: Color::from_rgb(30, 30, 46),       // Base
-                surface_primary: Color::from_rgb(36, 37, 54),  // Mantle
+                background: Color::from_rgb(30, 30, 46), // Base
+                surface_primary: Color::from_rgb(36, 37, 54), // Mantle
                 surface_secondary: Color::from_rgb(24, 24, 37), // Crust
                 surface_tertiary: Color::from_rgb(49, 50, 68), // Surface0
-                surface_inverse: Color::from_rgb(69, 71, 90),  // Surface1
+                surface_inverse: Color::from_rgb(69, 71, 90), // Surface1
                 surface_inverse_secondary: Color::from_rgb(33, 34, 50),
                 surface_inverse_tertiary: Color::from_rgb(88, 91, 112),
-                border: Color::from_rgb(52, 54, 74),          // Subtle border
+                border: Color::from_rgb(52, 54, 74), // Subtle border
                 border_focus: Color::from_rgb(137, 180, 250),
                 border_disabled: Color::from_rgb(40, 42, 60),
                 text_primary: Color::from_rgb(205, 214, 244), // Text
@@ -276,15 +276,15 @@ impl ThemePreset {
             },
             // Nord Minimal: Pure understated arctic grays and cool muted tones
             ThemePreset::NordicMinimal => ColorsSheet {
-                primary: Color::from_rgb(136, 192, 208),       // Muted Cyan
+                primary: Color::from_rgb(136, 192, 208), // Muted Cyan
                 secondary: Color::from_rgb(129, 161, 193),
                 tertiary: Color::from_rgb(59, 66, 82),
                 success: Color::from_rgb(163, 190, 140),
                 warning: Color::from_rgb(235, 203, 139),
                 error: Color::from_rgb(191, 97, 106),
                 info: Color::from_rgb(136, 192, 208),
-                background: Color::from_rgb(46, 52, 64),       // Nord0
-                surface_primary: Color::from_rgb(52, 59, 73),  // Nord1
+                background: Color::from_rgb(46, 52, 64), // Nord0
+                surface_primary: Color::from_rgb(52, 59, 73), // Nord1
                 surface_secondary: Color::from_rgb(40, 45, 55),
                 surface_tertiary: Color::from_rgb(67, 76, 94), // Nord2
                 surface_inverse: Color::from_rgb(76, 86, 106), // Nord3
@@ -293,7 +293,7 @@ impl ThemePreset {
                 border: Color::from_rgb(67, 76, 94),
                 border_focus: Color::from_rgb(136, 192, 208),
                 border_disabled: Color::from_rgb(55, 62, 77),
-                text_primary: Color::from_rgb(229, 233, 240),  // Nord5
+                text_primary: Color::from_rgb(229, 233, 240), // Nord5
                 text_secondary: Color::from_rgb(180, 188, 204),
                 text_placeholder: Color::from_rgb(130, 138, 155),
                 text_inverse: Color::from_rgb(245, 247, 250),
@@ -306,15 +306,15 @@ impl ThemePreset {
             },
             // One Dark Pro: The standard VS Code / Atom dark theme
             ThemePreset::OneDarkPro => ColorsSheet {
-                primary: Color::from_rgb(97, 175, 239),        // One Blue
-                secondary: Color::from_rgb(198, 120, 221),     // Purple
+                primary: Color::from_rgb(97, 175, 239),    // One Blue
+                secondary: Color::from_rgb(198, 120, 221), // Purple
                 tertiary: Color::from_rgb(44, 49, 58),
                 success: Color::from_rgb(152, 195, 121),
                 warning: Color::from_rgb(229, 192, 123),
                 error: Color::from_rgb(224, 108, 117),
                 info: Color::from_rgb(86, 182, 194),
-                background: Color::from_rgb(33, 37, 43),       // Neutral dark gray
-                surface_primary: Color::from_rgb(40, 44, 52),  // Editor background
+                background: Color::from_rgb(33, 37, 43), // Neutral dark gray
+                surface_primary: Color::from_rgb(40, 44, 52), // Editor background
                 surface_secondary: Color::from_rgb(28, 31, 36),
                 surface_tertiary: Color::from_rgb(49, 54, 63),
                 surface_inverse: Color::from_rgb(58, 64, 76),
@@ -336,15 +336,15 @@ impl ThemePreset {
             },
             // Midnight Clean: Neutral deep charcoal with subtle sapphire touches
             ThemePreset::MidnightBlue => ColorsSheet {
-                primary: Color::from_rgb(56, 139, 253),        // Modern clean blue
+                primary: Color::from_rgb(56, 139, 253), // Modern clean blue
                 secondary: Color::from_rgb(139, 148, 158),
                 tertiary: Color::from_rgb(33, 38, 45),
                 success: Color::from_rgb(63, 185, 80),
                 warning: Color::from_rgb(210, 153, 34),
                 error: Color::from_rgb(248, 81, 73),
                 info: Color::from_rgb(88, 166, 255),
-                background: Color::from_rgb(13, 17, 23),       // GitHub Dark Dimmed base
-                surface_primary: Color::from_rgb(22, 27, 34),  // GitHub Dark surface
+                background: Color::from_rgb(13, 17, 23), // GitHub Dark Dimmed base
+                surface_primary: Color::from_rgb(22, 27, 34), // GitHub Dark surface
                 surface_secondary: Color::from_rgb(10, 13, 18),
                 surface_tertiary: Color::from_rgb(33, 38, 45),
                 surface_inverse: Color::from_rgb(40, 46, 56),
@@ -366,24 +366,24 @@ impl ThemePreset {
             },
             // GitHub Light: Clean, crisp, professional white/slate light theme
             ThemePreset::GitHubLight => ColorsSheet {
-                primary: Color::from_rgb(9, 105, 218),         // GitHub Light Blue
+                primary: Color::from_rgb(9, 105, 218), // GitHub Light Blue
                 secondary: Color::from_rgb(87, 96, 106),
                 tertiary: Color::from_rgb(234, 238, 242),
                 success: Color::from_rgb(26, 127, 55),
                 warning: Color::from_rgb(154, 103, 0),
                 error: Color::from_rgb(207, 34, 46),
                 info: Color::from_rgb(9, 105, 218),
-                background: Color::from_rgb(255, 255, 255),    // Pure white canvas
+                background: Color::from_rgb(255, 255, 255), // Pure white canvas
                 surface_primary: Color::from_rgb(246, 248, 250), // Off-white clean surface
                 surface_secondary: Color::from_rgb(250, 251, 252),
                 surface_tertiary: Color::from_rgb(234, 238, 242),
                 surface_inverse: Color::from_rgb(222, 228, 234), // Subtle message card
                 surface_inverse_secondary: Color::from_rgb(243, 245, 247),
                 surface_inverse_tertiary: Color::from_rgb(210, 216, 222),
-                border: Color::from_rgb(216, 222, 228),        // Subtle crisp light border
+                border: Color::from_rgb(216, 222, 228), // Subtle crisp light border
                 border_focus: Color::from_rgb(9, 105, 218),
                 border_disabled: Color::from_rgb(230, 235, 240),
-                text_primary: Color::from_rgb(31, 35, 40),     // High-contrast readable charcoal
+                text_primary: Color::from_rgb(31, 35, 40), // High-contrast readable charcoal
                 text_secondary: Color::from_rgb(87, 96, 106),
                 text_placeholder: Color::from_rgb(140, 149, 159),
                 text_inverse: Color::from_rgb(20, 24, 28),
@@ -412,4 +412,3 @@ impl ThemePreset {
 pub fn load_theme() -> Theme {
     ThemePreset::ObsidianDark.to_theme()
 }
-

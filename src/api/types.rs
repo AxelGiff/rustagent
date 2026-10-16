@@ -74,4 +74,3 @@ pub struct Adder;
 
 #[derive(Deserialize, Serialize)]
 pub struct ReadFile;
-

@@ -1,4 +1,4 @@
-use crate::diff::{computed_diff, DiffLine};
+use crate::diff::{DiffLine, computed_diff};
 
 /// Print Myers algorithm diff between `old_text` and `new_text` in the console.
 ///
@@ -20,9 +20,9 @@ pub fn log_myers_diff(target_name: &str, old_text: &str, new_text: &str) {
     let diffs = computed_diff(old_text, new_text);
 
     // Compteurs pour le résumé statistique du diff
-    let mut added_count = 0;      // nombre de lignes ajoutées
-    let mut deleted_count = 0;    // nombre de lignes supprimées
-    let mut unchanged_count = 0;  // nombre de lignes inchangées
+    let mut added_count = 0; // nombre de lignes ajoutées
+    let mut deleted_count = 0; // nombre de lignes supprimées
+    let mut unchanged_count = 0; // nombre de lignes inchangées
 
     // Parcourt chaque ligne du résultat du diff pour l'afficher avec son préfixe
     for line in &diffs {

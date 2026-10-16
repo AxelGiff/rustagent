@@ -1,11 +1,14 @@
 //! Chat history builders, tool argument sanitizers, and lenient JSON repair.
 
-use serde_json::{json, Value};
 use crate::types::{Message, Role};
+use serde_json::{Value, json};
 
 /// Build a list of `rig::completion::Message` context history items from UI messages,
 /// skipping initial system warnings/welcome messages and capping to `max_history` entries.
-pub fn build_chat_history(messages: &[Message], max_history: usize) -> Vec<rig::completion::Message> {
+pub fn build_chat_history(
+    messages: &[Message],
+    max_history: usize,
+) -> Vec<rig::completion::Message> {
     let mut history = Vec::new();
 
     for msg in messages {
@@ -42,7 +45,11 @@ pub fn build_chat_history(messages: &[Message], max_history: usize) -> Vec<rig::
 pub fn describe_tool_call(name: &str, args: &Value) -> String {
     let pick = |keys: &[&str]| -> String {
         keys.iter()
-            .find_map(|k| args.get(*k).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()))
+            .find_map(|k| {
+                args.get(*k)
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or("")
             .chars()
             .take(80)
@@ -198,12 +205,12 @@ pub fn parse_lenient_tool_args(raw: &str) -> Value {
         let pattern = format!("\"{}\":", key);
         if let Some(pos) = s.find(&pattern) {
             let after = s[pos + pattern.len()..].trim();
-            if after.starts_with('"') {
-                if let Some(end_quote) = after[1..].find('"') {
-                    let path_val = &after[1..1 + end_quote];
-                    extracted[key] = json!(path_val);
-                    break;
-                }
+            if after.starts_with('"')
+                && let Some(end_quote) = after[1..].find('"')
+            {
+                let path_val = &after[1..1 + end_quote];
+                extracted[key] = json!(path_val);
+                break;
             }
         }
     }
@@ -267,4 +274,3 @@ mod tests {
         assert_eq!(history.len(), 10);
     }
 }
-

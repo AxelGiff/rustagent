@@ -1,5 +1,5 @@
-use similar::{Algorithm, ChangeTag, TextDiff};
 use crate::myers;
+use similar::{Algorithm, ChangeTag, TextDiff};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DiffLine {

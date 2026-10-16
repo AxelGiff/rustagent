@@ -11,9 +11,7 @@ pub fn main_workspace_layout(
 ) -> impl IntoElement {
     ResizableContainer::new()
         .direction(Direction::Horizontal)
-        .panel(
-            ResizablePanel::new(PanelSize::percent(18.)).child(file_tree),
-        )
+        .panel(ResizablePanel::new(PanelSize::percent(18.)).child(file_tree))
         .panel(
             ResizablePanel::new(PanelSize::percent(52.)).child(
                 ResizableContainer::new()
@@ -23,12 +21,7 @@ pub fn main_workspace_layout(
             ),
         )
         .panel(
-            ResizablePanel::new(PanelSize::percent(30.)).child(
-                rect()
-                    .expanded()
-                    .content(Content::Flex)
-                    .child(chat),
-            ),
+            ResizablePanel::new(PanelSize::percent(30.))
+                .child(rect().expanded().content(Content::Flex).child(chat)),
         )
 }
-

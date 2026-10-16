@@ -1,4 +1,3 @@
-
 #![allow(dead_code)]
 
 // ============================================================================
@@ -10,14 +9,14 @@
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
-use serde::{Deserialize, Serialize};
 
 /*
 #[derive(Debug, Serialize, Deserialize)]
@@ -178,8 +177,14 @@ impl McpClient {
             .spawn()?;
 
         // Récupère les handles stdin et stdout du processus enfant.
-        let stdin = child.stdin.take().ok_or_else(|| McpError::Protocol("Failed to open stdin".into()))?;
-        let stdout = child.stdout.take().ok_or_else(|| McpError::Protocol("Failed to open stdout".into()))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| McpError::Protocol("Failed to open stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| McpError::Protocol("Failed to open stdout".into()))?;
 
         // Enveloppe le stdout dans un BufReader pour lire ligne par ligne.
         let stdout_lines = BufReader::new(stdout).lines();
@@ -262,7 +267,9 @@ impl McpClient {
         }
 
         // Si on sort de la boucle sans réponse, c'est que le flux est fermé.
-        Err(McpError::Protocol("Process stream closed without response".into()))
+        Err(McpError::Protocol(
+            "Process stream closed without response".into(),
+        ))
     }
 
     /// Envoie une notification JSON-RPC au serveur MCP sans attendre de réponse.
@@ -311,14 +318,19 @@ impl McpClient {
     async fn initialize(&self) -> Result<(), McpError> {
         // Envoie la requête d'initialisation avec la version du protocole,
         // les capacités du client et les informations d'identification.
-        let _ = self.request("initialize", Some(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "RustAgent",
-                "version": "0.1.0"
-            }
-        }))).await?;
+        let _ = self
+            .request(
+                "initialize",
+                Some(json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "RustAgent",
+                        "version": "0.1.0"
+                    }
+                })),
+            )
+            .await?;
 
         // Notifie le serveur que l'initialisation du client est terminée.
         self.notify("notifications/initialized", None).await?;
@@ -362,10 +374,15 @@ impl McpClient {
     /// `McpError` si l'appel a échoué ou si l'outil a renvoyé une erreur.
     pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String, McpError> {
         // Envoie la requête d'appel d'outil avec le nom et les arguments.
-        let res = self.request("tools/call", Some(json!({
-            "name": name,
-            "arguments": arguments
-        }))).await?;
+        let res = self
+            .request(
+                "tools/call",
+                Some(json!({
+                    "name": name,
+                    "arguments": arguments
+                })),
+            )
+            .await?;
 
         // Désérialise la réponse en structure `CallToolResult`.
         let call_res: CallToolResult = serde_json::from_value(res)?;
@@ -377,7 +394,8 @@ impl McpClient {
 
         // Concatène les textes de tous les contenus renvoyés, séparés par des
         // retours à la ligne, en ignorant les contenus sans texte.
-        let output = call_res.content
+        let output = call_res
+            .content
             .into_iter()
             .filter_map(|c| c.text)
             .collect::<Vec<_>>()
@@ -386,7 +404,6 @@ impl McpClient {
         Ok(output)
     }
 }
-
 
 /// Erreur d'exécution d'un outil MCP dynamique.
 ///
@@ -443,7 +460,11 @@ impl Tool for McpDynamicTool {
 
         ToolDefinition {
             name: self.info.name.clone(),
-            description: self.info.description.clone().unwrap_or_else(|| "Lit le contenu d'un fichier".to_string()),
+            description: self
+                .info
+                .description
+                .clone()
+                .unwrap_or_else(|| "Lit le contenu d'un fichier".to_string()),
             parameters: self.info.input_schema.clone(),
         }
     }
@@ -454,10 +475,14 @@ impl Tool for McpDynamicTool {
     /// cet outil. Elle délègue l'exécution au serveur MCP via `client.call_tool`.
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         // Log de débogage : affiche l'appel d'outil reçu.
-        println!("[MCP CALL REÇU DANS RIG] Appel de {} avec args: {:?}", self.info.name, args);
+        println!(
+            "[MCP CALL REÇU DANS RIG] Appel de {} avec args: {:?}",
+            self.info.name, args
+        );
 
         // Délègue l'exécution au serveur MCP distant.
-        let result = self.client
+        let result = self
+            .client
             .call_tool(&self.info.name, args)
             .await
             .map_err(|e| DynamicToolError(e.to_string()))?;
