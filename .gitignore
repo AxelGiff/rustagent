@@ -53,3 +53,10 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Agent specifications & plans
+plan.md
+**/plan.md
+SPEC_SYSTEM_PLAN.md
+tasks/SPEC_SYSTEM_PLAN.md
+

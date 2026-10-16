@@ -174,8 +174,8 @@ fn identifier_after_keyword(line: &str, keywords: &[&str]) -> Option<String> {
 fn html_title(code: &str) -> Option<String> {
     let lower = code.to_lowercase();
     let start = lower.find("<title>")? + "<title>".len();
-    let end = lower[start..].find("</title>")? + start;
-    let title = code[start..end].trim();
+    let end = lower.get(start..)?.find("</title>")? + start;
+    let title = code.get(start..end).unwrap_or_else(|| lower.get(start..end).unwrap_or("")).trim();
     if title.is_empty() {
         None
     } else {

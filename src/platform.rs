@@ -5,113 +5,92 @@
 //! centralisé ici afin que le reste de l'application puisse rester agnostique à la plateforme.
 //!
 //! # Plateformes supportées
-//! - Windows (via `cfg!(windows)`)
+//! - Windows (via `cfg!(windows)`) — privilégie Git Bash (`bash.exe`)
 //! - macOS (via `cfg!(target_os = "macos")`)
 //! - Linux / autres Unix (comportement par défaut)
-//!
-//! Les fonctions de ce module utilisent des macros de compilation conditionnelles
-//! (`cfg!`) pour sélectionner le comportement approprié à chaque plateforme.
+
+/// Recherche l'exécutable `bash` (Git Bash sur Windows, ou `bash` standard sur Unix).
+pub fn find_bash_executable() -> Option<String> {
+    if cfg!(windows) {
+        let mut candidates = vec![
+            std::path::PathBuf::from(r"C:\Program Files\Git\bin\bash.exe"),
+            std::path::PathBuf::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+            std::path::PathBuf::from(r"C:\Program Files (x86)\Git\bin\bash.exe"),
+        ];
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(
+                std::path::PathBuf::from(local_app_data).join(r"Programs\Git\bin\bash.exe"),
+            );
+        }
+        if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+            candidates.push(
+                std::path::PathBuf::from(userprofile).join(r"scoop\shims\bash.exe"),
+            );
+        }
+        for candidate in candidates {
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+        // Vérifier dans le PATH
+        if let Some(path_var) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&path_var) {
+                let b = dir.join("bash.exe");
+                // Éviter le stub WSL System32\bash.exe si aucun distro WSL n'est souhaité, privilégier Git/MSYS
+                let lower = b.to_string_lossy().to_lowercase();
+                if b.is_file() && !lower.contains("system32") {
+                    return Some(b.to_string_lossy().to_string());
+                }
+            }
+        }
+        None
+    } else {
+        Some("bash".to_string())
+    }
+}
 
 /// Le shell utilisé pour lancer le terminal intégré.
 ///
-/// - Windows : PowerShell (largement disponible et scriptable).
-/// - Unix (Linux/macOS) : bash.
-///
-/// # Retour
-/// Le nom de l'exécutable du shell sous forme de chaîne statique.
-pub fn terminal_shell() -> &'static str {
-    // Détection de la plateforme au moment de la compilation :
-    // la branche Windows est compilée uniquement sur Windows,
-    // la branche Unix est compilée sur toutes les autres plateformes.
-    if cfg!(windows) {
-        "powershell.exe"
+/// Privilégie `bash` (Git Bash sur Windows, `bash` sur Linux/macOS) afin d'éviter
+/// les erreurs de syntaxe PowerShell/cmd.exe.
+pub fn terminal_shell() -> String {
+    if let Some(bash) = find_bash_executable() {
+        bash
+    } else if cfg!(windows) {
+        "powershell.exe".to_string()
     } else {
-        "bash"
+        "bash".to_string()
     }
 }
 
 /// Arguments de ligne de commande supplémentaires passés au shell du terminal afin
 /// qu'il signale son répertoire de travail courant via OSC 7 à chaque invite.
-///
-/// La barre latérale de l'arborescence de fichiers s'appuie sur le répertoire de
-/// travail signalé par le terminal pour savoir quel dossier afficher. Le shell doit
-/// donc émettre activement la séquence OSC 7 (bash ne le fait pas par défaut).
-///
-/// Ces arguments diffèrent selon la plateforme :
-/// - **Windows** : `-NoExit -ExecutionPolicy Bypass -File <osc7.ps1>`
-///   → PowerShell reste ouvert, contourne la politique d'exécution et charge
-///   le script OSC 7.
-/// - **Unix** : `--init-file <osc7.bash>`
-///   → bash charge le fichier d'initialisation OSC 7 au démarrage.
-///
-/// Les arguments vides sont filtrés afin de ne conserver que les paramètres
-/// réellement nécessaires pour la plateforme courante.
 pub fn terminal_shell_args() -> Vec<String> {
-    // Construction sélective des arguments selon la plateforme.
-    // Chaque case correspond à une position précise dans la ligne de commande.
-    vec![
-        // Position 1 : paramètre principal du shell
-        if cfg!(windows) {
-            "-NoExit".to_string()          // PowerShell : reste ouvert après exécution
-        } else {
-            "--init-file".to_string()      // bash : charge un fichier d'init personnalisé
-        },
-        // Position 2 : valeur du paramètre précédent
-        if cfg!(windows) {
-            "-ExecutionPolicy".to_string() // PowerShell : politique d'exécution
-        } else {
-            osc7_init_file().display().to_string() // bash : chemin du fichier OSC 7
-        },
-        // Position 3 : valeur de l'ExecutionPolicy (Windows uniquement)
-        if cfg!(windows) {
-            "Bypass".to_string()           // Contourne la politique de sécurité
-        } else {
-            "".to_string()                 // Non utilisé sur Unix
-        },
-        // Position 4 : flag -File pour PowerShell
-        if cfg!(windows) {
-            "-File".to_string()            // Indique qu'on passe un fichier script
-        } else {
-            "".to_string()                 // Non utilisé sur Unix
-        },
-        // Position 5 : chemin du script OSC 7 (Windows uniquement)
-        if cfg!(windows) {
-            osc7_init_file().display().to_string() // Script PowerShell OSC 7
-        } else {
-            "".to_string()                 // Non utilisé sur Unix
-        },
-    ]
-    .into_iter()
-    // Filtre les chaînes vides pour ne garder que les arguments pertinents
-    .filter(|s| !s.is_empty())
-    .collect()
+    let uses_bash = find_bash_executable().is_some() || !cfg!(windows);
+    if uses_bash {
+        vec![
+            "--init-file".to_string(),
+            osc7_init_file(true).display().to_string(),
+        ]
+    } else {
+        vec![
+            "-NoExit".to_string(),
+            "-ExecutionPolicy".to_string(),
+            "Bypass".to_string(),
+            "-File".to_string(),
+            osc7_init_file(false).display().to_string(),
+        ]
+    }
 }
 
 /// Chemin vers un fichier d'initialisation de shell généré qui fait que le shell
 /// signale son répertoire de travail courant via OSC 7 à chaque invite.
-///
-/// Le fichier est écrit dans le répertoire temporaire de la plateforme et est
-/// idempotent : il est régénéré à chaque appel, reflétant ainsi toujours la logique actuelle.
-///
-/// # OSC 7
-/// OSC 7 est une séquence d'échappement de terminal (\x1b]7;...) qui permet
-/// au shell de communiquer son répertoire de travail à l'application hôte.
-/// C'est utilisé par l'arborescence de fichiers intégrée pour suivre le dossier courant.
-///
-/// # Retour
-/// Le chemin complet vers le fichier d'initialisation généré (`osc7.ps1` sur Windows,
-/// `osc7.bash` sur Unix).
-fn osc7_init_file() -> std::path::PathBuf {
-    // Répertoire temporaire dédié à rustagent : <temp>/rustagent/
+fn osc7_init_file(for_bash: bool) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("rustagent");
-    // Crée le répertoire s'il n'existe pas (échec silencieux s'il existe déjà)
     let _ = std::fs::create_dir_all(&dir);
 
-    if cfg!(windows) {
-        // --- Windows : script PowerShell ---
+    if !for_bash && cfg!(windows) {
         let path = dir.join("osc7.ps1");
-        // Le script redéfinit la fonction `prompt` de PowerShell pour qu'elle
-        // émette la séquence OSC 7 avec le chemin PWD (encodé en URL).
         let content = r#"# rustagent fichier d'initialisation OSC 7 pour PowerShell.
 function prompt {
     $p = $PWD.Path.Replace('\', '/').Replace(' ', '%20')
@@ -122,19 +101,35 @@ function prompt {
 }
 Clear-Host
 "#;
-        // Écrit le fichier (échec silencieux en cas d'erreur)
         let _ = std::fs::write(&path, content);
         path
     } else {
-        // --- Unix (Linux/macOS) : script bash ---
         let path = dir.join("osc7.bash");
-        let content = r#"# rustagent fichier d'initialisation OSC 7.
-# Préserve les personnalisations bash normales de l'utilisateur.
+        let content = if cfg!(windows) {
+            r#"# rustagent fichier d'initialisation OSC 7 pour Git Bash (Windows).
+if [ -f /etc/profile ]; then
+    . /etc/profile
+fi
 if [ -f "$HOME/.bashrc" ]; then
     . "$HOME/.bashrc"
 fi
 
-# Émet le répertoire de travail courant via OSC 7 afin que l'application puisse le suivre.
+__rustagent_osc7() {
+    local win_pwd
+    win_pwd="$(pwd -W 2>/dev/null || pwd)"
+    win_pwd="${win_pwd//$'\r'/}"
+    win_pwd="${win_pwd//\\//}"
+    win_pwd="${win_pwd// /%20}"
+    printf '\033]7;file:///%s\007' "$win_pwd"
+}
+PROMPT_COMMAND="__rustagent_osc7"
+"#
+        } else {
+            r#"# rustagent fichier d'initialisation OSC 7.
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
 __rustagent_osc7() {
     local encoded="" c
     local i
@@ -148,27 +143,24 @@ __rustagent_osc7() {
     printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$encoded"
 }
 PROMPT_COMMAND="__rustagent_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
-"#;
-        // Écrit le fichier (échec silencieux en cas d'erreur)
-        let _ = std::fs::write(&path, content);
+"#
+        };
+        // Toujours écrire osc7.bash avec des fins de ligne Unix (\n) même si ce fichier source est en CRLF
+        let normalized = content.replace("\r\n", "\n");
+        let _ = std::fs::write(&path, normalized);
         path
     }
 }
 
 /// Variables d'environnement à définir sur le shell du terminal.
-///
-/// `TERM`, `COLORTERM` et `LANG` sont spécifiques à Unix et ne sont définies que
-/// sur les plateformes non-Windows. Les terminaux Windows n'utilisent pas ces variables.
-///
-/// # Retour
-/// Une liste de paires (clé, valeur) à injecter dans l'environnement du shell.
 pub fn terminal_env() -> Vec<(&'static str, &'static str)> {
     let mut env = Vec::new();
-    // Ces variables sont actuellement uniquement utilisées par les terminaux Unix.
+    if find_bash_executable().is_some() || !cfg!(windows) {
+        env.push(("TERM", "xterm-256color"));
+        env.push(("COLORTERM", "truecolor"));
+    }
     if !cfg!(windows) {
-        env.push(("TERM", "xterm-256color")); // Type de terminal : couleurs étendues xterm
-        env.push(("COLORTERM", "truecolor")); // Support des couleurs 24 bits (truecolor)
-        env.push(("LANG", "en_GB.UTF-8"));    // Locale : anglais britannique UTF-8
+        env.push(("LANG", "en_GB.UTF-8"));
     }
     env
 }
