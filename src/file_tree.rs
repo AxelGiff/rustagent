@@ -68,7 +68,10 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
 
         // Directories first (alphabetical), then files (alphabetical).
-        assert_eq!(names, vec!["alpha_dir", "zeta_dir", "alpha_file.txt", "beta_file.txt"]);
+        assert_eq!(
+            names,
+            vec!["alpha_dir", "zeta_dir", "alpha_file.txt", "beta_file.txt"]
+        );
         assert!(entries[0].is_dir);
         assert!(entries[1].is_dir);
         assert!(!entries[2].is_dir);

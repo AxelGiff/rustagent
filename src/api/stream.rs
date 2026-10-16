@@ -1,23 +1,22 @@
 //! Streaming primitives, cancellation flags, and retry logic.
 
+use super::error::{
+    ApiErrorCategory, MAX_ATTEMPTS, REQUEST_TIMEOUT, backoff_delay, classify_error, is_transient,
+};
 use futures_util::StreamExt;
-use super::error::{backoff_delay, classify_error, is_transient, ApiErrorCategory, MAX_ATTEMPTS, REQUEST_TIMEOUT};
-
-/// Drapeau global d'annulation (bouton Stop).
-static CANCEL_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Demande l'arrêt de la génération en cours.
 pub fn request_cancel() {
-    CANCEL_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
+    crate::session::default_session().request_cancel();
 }
 
 /// Réinitialise l'état d'annulation avant de démarrer une nouvelle génération.
 pub fn reset_cancel() {
-    CANCEL_FLAG.store(false, std::sync::atomic::Ordering::SeqCst);
+    crate::session::default_session().reset_cancel();
 }
 
 pub fn is_cancel_requested() -> bool {
-    CANCEL_FLAG.load(std::sync::atomic::Ordering::SeqCst)
+    crate::session::default_session().is_cancel_requested()
 }
 
 pub fn cancelled_summary(accumulated: &str) -> String {
@@ -124,10 +123,8 @@ mod tests {
         let mut chunks_received = Vec::new();
         let result = prompt_stream_with_retry(
             || async {
-                let items: Vec<Result<String, String>> = vec![
-                    Ok("Hello, ".to_string()),
-                    Ok("world!".to_string()),
-                ];
+                let items: Vec<Result<String, String>> =
+                    vec![Ok("Hello, ".to_string()), Ok("world!".to_string())];
                 Ok(stream::iter(items))
             },
             |chunk| chunks_received.push(chunk.to_string()),
@@ -196,10 +193,8 @@ mod tests {
         let mut count = 0;
         let result = prompt_stream_with_retry(
             || async {
-                let items: Vec<Result<String, String>> = vec![
-                    Ok("Chunk 1".to_string()),
-                    Ok("Chunk 2".to_string()),
-                ];
+                let items: Vec<Result<String, String>> =
+                    vec![Ok("Chunk 1".to_string()), Ok("Chunk 2".to_string())];
                 Ok(stream::iter(items))
             },
             |chunk| chunks_received.push(chunk.to_string()),
@@ -214,4 +209,3 @@ mod tests {
         assert_eq!(chunks_received, vec!["Chunk 1"]);
     }
 }
-

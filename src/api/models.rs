@@ -1,7 +1,7 @@
 //! Model discovery and fetching from OpenAI-compatible endpoints.
 
-use std::time::Duration;
 use serde_json::Value;
+use std::time::Duration;
 
 /// Fetch the list of available model IDs from the OpenAI-compatible `/models` endpoint.
 pub async fn fetch_models(endpoint: &str, api_key: &str) -> Result<Vec<String>, String> {
@@ -49,4 +49,3 @@ pub async fn fetch_models(endpoint: &str, api_key: &str) -> Result<Vec<String>, 
     models.sort();
     Ok(models)
 }
-

@@ -56,19 +56,20 @@ pub fn extract_spec_payload(content: &str) -> (String, bool, Option<SpecQuestion
             after
         };
         if let Ok(mut payload) = serde_json::from_str::<SpecQuestionsPayload>(json_str) {
-            if payload.questions.is_empty() {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    let norm = tools::normalize_spec_questions(&val, "");
-                    if let Ok(q) = serde_json::from_value::<Vec<SpecQuestionItem>>(norm) {
-                        payload.questions = q;
-                    }
+            if payload.questions.is_empty()
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str)
+            {
+                let norm = tools::normalize_spec_questions(&val, "");
+                if let Ok(q) = serde_json::from_value::<Vec<SpecQuestionItem>>(norm) {
+                    payload.questions = q;
                 }
             }
             parsed_payload = Some(payload);
         } else if let Ok(questions) = serde_json::from_str::<Vec<SpecQuestionItem>>(json_str) {
             let q_vec = if questions.is_empty() {
                 let norm = tools::fallback_spec_questions("");
-                serde_json::from_value::<Vec<SpecQuestionItem>>(serde_json::json!(norm)).unwrap_or_default()
+                serde_json::from_value::<Vec<SpecQuestionItem>>(serde_json::json!(norm))
+                    .unwrap_or_default()
             } else {
                 questions
             };
@@ -90,4 +91,3 @@ pub fn extract_spec_payload(content: &str) -> (String, bool, Option<SpecQuestion
 
     (cleaned.trim().to_string(), recommend_spec, parsed_payload)
 }
-

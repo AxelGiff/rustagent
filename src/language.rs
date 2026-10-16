@@ -1,7 +1,7 @@
 //! Supported programming languages and tree-sitter syntax highlighting configuration.
 
-use freya::code_editor::EditorLanguage;
 use crate::platform;
+use freya::code_editor::EditorLanguage;
 
 /// A programming language supported by the editor. Each language knows its
 /// tree-sitter grammar, highlights query, file extension and how to run it.
@@ -171,7 +171,7 @@ impl SupportedLanguage {
             .filter(|s| !s.is_empty())
             .collect();
 
-        let has_word = |target: &str| words.iter().any(|&w| w == target);
+        let has_word = |target: &str| words.contains(&target);
         let has_any = |targets: &[&str]| targets.iter().any(|&t| has_word(t));
 
         if has_any(&["javascript", "js", "node", "nodejs"]) {
@@ -319,8 +319,14 @@ mod tests {
 
     #[test]
     fn from_extension_matches_expected() {
-        assert_eq!(SupportedLanguage::from_extension("rs"), Some(SupportedLanguage::Rust));
-        assert_eq!(SupportedLanguage::from_extension("PY"), Some(SupportedLanguage::Python));
+        assert_eq!(
+            SupportedLanguage::from_extension("rs"),
+            Some(SupportedLanguage::Rust)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("PY"),
+            Some(SupportedLanguage::Python)
+        );
         assert_eq!(SupportedLanguage::from_extension("unknown"), None);
     }
 
@@ -337,4 +343,3 @@ mod tests {
         assert!(cmd.contains("run"));
     }
 }
-

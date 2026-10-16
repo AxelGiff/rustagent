@@ -1,14 +1,15 @@
 //! Top application toolbar: title, theme preset selector, settings trigger, chat/terminal reset buttons.
 
-use freya::prelude::*;
 use crate::api;
 use crate::theme::ThemePreset;
+use freya::prelude::*;
 
 /// Builds the top application toolbar.
+#[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
 pub fn app_toolbar(
     current_theme: Writable<ThemePreset>,
     theme_state: Writable<Theme>,
-    mut show_settings: Writable<bool>,
+    show_settings: Writable<bool>,
     available_models: Writable<Vec<String>>,
     models_loading: Writable<bool>,
     settings_endpoint_input: Readable<String>,
@@ -113,4 +114,3 @@ pub fn app_toolbar(
                 .child("Reset Terminal"),
         )
 }
-

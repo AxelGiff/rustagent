@@ -1,7 +1,7 @@
 //! Diff review panel component.
 
-use freya::prelude::*;
 use crate::diff;
+use freya::prelude::*;
 
 /// A dedicated diff preview panel for user review before accepting or rejecting file modifications.
 pub fn diff_viewer_panel(
@@ -19,7 +19,11 @@ pub fn diff_viewer_panel(
             .expanded()
             .center()
             .background(colors.background)
-            .child(label().text("Aucun diff en attente.").color(colors.text_secondary))
+            .child(
+                label()
+                    .text("Aucun diff en attente.")
+                    .color(colors.text_secondary),
+            )
             .into_element();
     }
 
@@ -154,7 +158,7 @@ pub fn diff_viewer_panel(
                                         .color(colors.text_highlight)
                                         .font_size(12.)
                                         .font_weight(FontWeight::BOLD),
-                                 ),
+                                ),
                         )
                         .child(
                             rect()
@@ -189,7 +193,10 @@ pub fn diff_viewer_panel(
                                 .font_size(12.)
                                 .into_element()
                         } else {
-                            rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                            rect()
+                                .width(Size::px(0.))
+                                .height(Size::px(0.))
+                                .into_element()
                         }),
                 )
                 .child(
@@ -240,7 +247,10 @@ pub fn diff_viewer_panel(
                         .child(format!("✓ Tout accepter ({})", diff_count))
                         .into_element()
                 } else {
-                    rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                    rect()
+                        .width(Size::px(0.))
+                        .height(Size::px(0.))
+                        .into_element()
                 })
                 .child(
                     Button::new()
@@ -263,7 +273,10 @@ pub fn diff_viewer_panel(
                         .child("✗ Tout rejeter")
                         .into_element()
                 } else {
-                    rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                    rect()
+                        .width(Size::px(0.))
+                        .height(Size::px(0.))
+                        .into_element()
                 })
                 .child(
                     label()
@@ -277,12 +290,7 @@ pub fn diff_viewer_panel(
                 .expanded()
                 .padding(8.)
                 .background(colors.surface_secondary)
-                .child(
-                    ScrollView::new().child(
-                        rect().width(Size::fill()).children(line_elements),
-                    ),
-                ),
+                .child(ScrollView::new().child(rect().width(Size::fill()).children(line_elements))),
         )
         .into_element()
 }
-

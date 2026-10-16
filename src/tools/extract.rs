@@ -9,10 +9,23 @@ pub fn extract_files_from_args(args: &Value) -> Vec<(String, String)> {
     let mut result = Vec::new();
 
     let parse_file_obj = |obj: &serde_json::Map<String, Value>| -> Option<(String, String)> {
-        let path = ["path", "file", "filepath", "file_path", "filename", "name", "target", "dest"]
-            .iter()
-            .find_map(|k| obj.get(*k).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()))
-            .map(|s| s.trim().to_string())?;
+        let path = [
+            "path",
+            "file",
+            "filepath",
+            "file_path",
+            "filename",
+            "name",
+            "target",
+            "dest",
+        ]
+        .iter()
+        .find_map(|k| {
+            obj.get(*k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+        })
+        .map(|s| s.trim().to_string())?;
         let content = ["content", "code", "text", "body", "source"]
             .iter()
             .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
@@ -35,21 +48,21 @@ pub fn extract_files_from_args(args: &Value) -> Vec<(String, String)> {
 
     // Déballage d'éventuelles enveloppes {"parameters": ...} ou {"arguments": ...} ou {"input": ...}
     for wrap_key in &["parameters", "arguments", "input", "args"] {
-        if let Some(wrapped) = root_val.get(*wrap_key) {
-            if wrapped.is_object() || wrapped.is_array() {
-                root_val = wrapped.clone();
-                break;
-            }
+        if let Some(wrapped) = root_val.get(*wrap_key)
+            && (wrapped.is_object() || wrapped.is_array())
+        {
+            root_val = wrapped.clone();
+            break;
         }
     }
 
     // Cas où root_val est directement un tableau
     if let Some(arr) = root_val.as_array() {
         for item in arr {
-            if let Some(obj) = item.as_object() {
-                if let Some(pair) = parse_file_obj(obj) {
-                    result.push(pair);
-                }
+            if let Some(obj) = item.as_object()
+                && let Some(pair) = parse_file_obj(obj)
+            {
+                result.push(pair);
             }
         }
         if !result.is_empty() {
@@ -64,10 +77,10 @@ pub fn extract_files_from_args(args: &Value) -> Vec<(String, String)> {
                 match v {
                     Value::Array(arr) => {
                         for item in arr {
-                            if let Some(obj) = item.as_object() {
-                                if let Some(pair) = parse_file_obj(obj) {
-                                    result.push(pair);
-                                }
+                            if let Some(obj) = item.as_object()
+                                && let Some(pair) = parse_file_obj(obj)
+                            {
+                                result.push(pair);
                             }
                         }
                     }
@@ -114,10 +127,10 @@ pub fn extract_files_from_args(args: &Value) -> Vec<(String, String)> {
             if is_filename {
                 if let Some(content_str) = v.as_str() {
                     result.push((k.clone(), content_str.to_string()));
-                } else if let Some(obj) = v.as_object() {
-                    if let Some(pair) = parse_file_obj(obj) {
-                        result.push(pair);
-                    }
+                } else if let Some(obj) = v.as_object()
+                    && let Some(pair) = parse_file_obj(obj)
+                {
+                    result.push(pair);
                 }
             }
         }
@@ -129,18 +142,25 @@ pub fn extract_files_from_args(args: &Value) -> Vec<(String, String)> {
 /// Extrait tous les blocs de code Markdown (```lang ... ```) d'un texte pour générer des fichiers.
 /// Détecte le nom du fichier depuis un commentaire en tête (ex: `<!-- index.html -->` ou `// main.rs`)
 /// ou déduit le nom à partir du tag de langage (ex: html -> index.html, css -> style.css, js -> script.js).
-pub fn extract_code_blocks_from_text(text: &str, default_dir: Option<&str>) -> Vec<(String, String)> {
+pub fn extract_code_blocks_from_text(
+    text: &str,
+    default_dir: Option<&str>,
+) -> Vec<(String, String)> {
     let mut files = Vec::new();
     let mut cursor = text;
     let mut file_index = 0;
 
     while let Some(start_fence) = cursor.find("```") {
         let after_fence = &cursor[start_fence + 3..];
-        let Some(first_nl) = after_fence.find('\n') else { break };
+        let Some(first_nl) = after_fence.find('\n') else {
+            break;
+        };
         let lang_tag = after_fence[..first_nl].trim().to_lowercase();
         let body_start = start_fence + 3 + first_nl + 1;
         let rest = &cursor[body_start..];
-        let Some(end_fence) = rest.find("```") else { break };
+        let Some(end_fence) = rest.find("```") else {
+            break;
+        };
         let code = rest[..end_fence].trim_end().to_string();
         cursor = &rest[end_fence + 3..];
 
@@ -170,23 +190,21 @@ pub fn extract_code_blocks_from_text(text: &str, default_dir: Option<&str>) -> V
             }
         }
 
-        let filename = detected_filename.unwrap_or_else(|| {
-            match lang_tag.as_str() {
-                "html" | "htm" => {
-                    if file_index == 1 {
-                        "index.html".to_string()
-                    } else {
-                        format!("page_{}.html", file_index)
-                    }
+        let filename = detected_filename.unwrap_or_else(|| match lang_tag.as_str() {
+            "html" | "htm" => {
+                if file_index == 1 {
+                    "index.html".to_string()
+                } else {
+                    format!("page_{}.html", file_index)
                 }
-                "css" => "style.css".to_string(),
-                "javascript" | "js" => "script.js".to_string(),
-                "typescript" | "ts" => "index.ts".to_string(),
-                "python" | "py" => "main.py".to_string(),
-                "rust" | "rs" => "src/main.rs".to_string(),
-                "json" => format!("data_{}.json", file_index),
-                _ => format!("file_{}.txt", file_index),
             }
+            "css" => "style.css".to_string(),
+            "javascript" | "js" => "script.js".to_string(),
+            "typescript" | "ts" => "index.ts".to_string(),
+            "python" | "py" => "main.py".to_string(),
+            "rust" | "rs" => "src/main.rs".to_string(),
+            "json" => format!("data_{}.json", file_index),
+            _ => format!("file_{}.txt", file_index),
         });
 
         let target_path = if let Some(base) = default_dir {
@@ -225,7 +243,16 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
 
     // 2. Tenter d'extraire path et content via des motifs flexibles (Python kwargs, unquoted JSON)
     let mut path_opt = None;
-    for key_pat in &["\"path\":", "'path':", "path:", "path=", "\"file\":", "'file':", "file:", "file="] {
+    for key_pat in &[
+        "\"path\":",
+        "'path':",
+        "path:",
+        "path=",
+        "\"file\":",
+        "'file':",
+        "file:",
+        "file=",
+    ] {
         if let Some(pos) = trimmed.find(key_pat) {
             let after = trimmed[pos + key_pat.len()..].trim_start();
             let quote = after.chars().next().unwrap_or(' ');
@@ -238,7 +265,9 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
                     }
                 }
             } else {
-                let end = after.find(|c: char| c == ',' || c == ')' || c == '}' || c.is_whitespace()).unwrap_or(after.len());
+                let end = after
+                    .find(|c: char| c == ',' || c == ')' || c == '}' || c.is_whitespace())
+                    .unwrap_or(after.len());
                 let val = after[..end].trim();
                 if !val.is_empty() {
                     path_opt = Some(val.to_string());
@@ -249,17 +278,30 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
     }
 
     let mut content_opt = None;
-    for key_pat in &["\"content\":", "'content':", "content:", "content=", "\"code\":", "'code':", "code:", "code="] {
+    for key_pat in &[
+        "\"content\":",
+        "'content':",
+        "content:",
+        "content=",
+        "\"code\":",
+        "'code':",
+        "code:",
+        "code=",
+    ] {
         if let Some(pos) = trimmed.find(key_pat) {
             let after = trimmed[pos + key_pat.len()..].trim_start();
             let quote = after.chars().next().unwrap_or(' ');
             if quote == '"' || quote == '\'' {
                 let end_q = after[1..].rfind(quote).unwrap_or(after.len() - 1);
                 let val = &after[1..1 + end_q];
-                content_opt = Some(val.replace("\\n", "\n").replace("\\\"", "\"").replace("\\'", "'"));
+                content_opt = Some(
+                    val.replace("\\n", "\n")
+                        .replace("\\\"", "\"")
+                        .replace("\\'", "'"),
+                );
                 break;
             } else {
-                let end = after.rfind(|c: char| c == ')' || c == '}').unwrap_or(after.len());
+                let end = after.rfind([')', '}']).unwrap_or(after.len());
                 let val = after[..end].trim();
                 if !val.is_empty() {
                     content_opt = Some(val.to_string());
@@ -280,14 +322,35 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
 /// Tente de repérer un chemin de fichier mentionné dans un texte (ex: "le fichier `src/styles.css`")
 pub fn extract_candidate_path_from_text(text: &str) -> Option<String> {
     for word in text.split_whitespace() {
-        let clean = word.trim_matches(|c: char| c == '`' || c == '\'' || c == '"' || c == '(' || c == ')' || c == ':' || c == ',');
-        if clean.contains('.') && !clean.contains("..") && !clean.ends_with('.') && clean.len() < 100 {
+        let clean = word.trim_matches(|c: char| {
+            c == '`' || c == '\'' || c == '"' || c == '(' || c == ')' || c == ':' || c == ','
+        });
+        if clean.contains('.')
+            && !clean.contains("..")
+            && !clean.ends_with('.')
+            && clean.len() < 100
+        {
             let ext = clean.rsplit('.').next().unwrap_or("").to_lowercase();
-            if matches!(ext.as_str(), "html" | "htm" | "css" | "js" | "ts" | "vue" | "jsx" | "tsx" | "json" | "py" | "rs" | "md" | "txt" | "toml") {
+            if matches!(
+                ext.as_str(),
+                "html"
+                    | "htm"
+                    | "css"
+                    | "js"
+                    | "ts"
+                    | "vue"
+                    | "jsx"
+                    | "tsx"
+                    | "json"
+                    | "py"
+                    | "rs"
+                    | "md"
+                    | "txt"
+                    | "toml"
+            ) {
                 return Some(clean.to_string());
             }
         }
     }
     None
 }
-

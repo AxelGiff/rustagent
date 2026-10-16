@@ -18,14 +18,11 @@ pub fn find_bash_executable() -> Option<String> {
             std::path::PathBuf::from(r"C:\Program Files (x86)\Git\bin\bash.exe"),
         ];
         if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            candidates.push(
-                std::path::PathBuf::from(local_app_data).join(r"Programs\Git\bin\bash.exe"),
-            );
+            candidates
+                .push(std::path::PathBuf::from(local_app_data).join(r"Programs\Git\bin\bash.exe"));
         }
         if let Some(userprofile) = std::env::var_os("USERPROFILE") {
-            candidates.push(
-                std::path::PathBuf::from(userprofile).join(r"scoop\shims\bash.exe"),
-            );
+            candidates.push(std::path::PathBuf::from(userprofile).join(r"scoop\shims\bash.exe"));
         }
         for candidate in candidates {
             if candidate.is_file() {
@@ -265,7 +262,6 @@ pub fn ts_runner() -> &'static str {
 pub fn rust_compiler() -> &'static str {
     "rustc"
 }
-
 
 /// Retourne le répertoire de configuration de l'application selon la plateforme.
 ///

@@ -1,9 +1,9 @@
 //! File tree sidebar component.
 
+use crate::file_tree;
 use freya::prelude::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use crate::file_tree;
 
 /// The left sidebar file-tree panel.
 ///
@@ -104,7 +104,13 @@ pub fn build_tree_rows(
                     .into_element(),
             );
             if is_expanded {
-                rows.extend(build_tree_rows(&entry.path, depth + 1, expanded.clone(), colors.clone(), on_open_file.clone()));
+                rows.extend(build_tree_rows(
+                    &entry.path,
+                    depth + 1,
+                    expanded.clone(),
+                    colors.clone(),
+                    on_open_file.clone(),
+                ));
             }
         } else {
             let file_path = entry.path.clone();
@@ -130,7 +136,11 @@ pub fn build_tree_rows(
                                     .cross_align(Alignment::Center)
                                     .spacing(6.)
                                     .child(label().text("•").color(colors.text_placeholder))
-                                    .child(label().text(entry.name.clone()).color(colors.text_highlight)),
+                                    .child(
+                                        label()
+                                            .text(entry.name.clone())
+                                            .color(colors.text_highlight),
+                                    ),
                             ),
                     )
                     .into_element(),
@@ -139,4 +149,3 @@ pub fn build_tree_rows(
     }
     rows
 }
-

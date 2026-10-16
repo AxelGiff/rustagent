@@ -1,12 +1,34 @@
 //! Dispatch router and executor for native tools.
 
-use std::path::Path;
-use serde_json::Value;
-use crate::diff::{computed_diff, PendingDiff};
+use super::approval::request_command_approval;
 use super::definitions::ToolResult;
 use super::extract::{extract_files_from_args, extract_files_from_raw_str};
-use super::fs::{dangerous_command_reason, resolve_tool_path, run_shell_command, search_dir_recursive, truncate_output};
+use super::fs::{
+    dangerous_command_reason, is_pre_approved_command, resolve_tool_path, run_shell_command,
+    search_dir_recursive, truncate_output,
+};
 use super::plan::{ensure_plan_in_gitignore, normalize_spec_questions};
+use super::verify::{run_verification, stage_file};
+use crate::diff::{PendingDiff, computed_diff};
+use serde_json::Value;
+use std::path::Path;
+
+/// Compute the `.gitignore` update on a blocking thread so the async runtime is
+/// never blocked by file I/O.
+async fn update_gitignore(path: std::path::PathBuf) {
+    let _ = tokio::task::spawn_blocking(move || ensure_plan_in_gitignore(&path)).await;
+}
+
+/// Build a unique pending-diff identifier.
+fn new_diff_id() -> String {
+    format!(
+        "diff_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    )
+}
 
 /// Executes a native tool by name with the given JSON arguments.
 pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
@@ -26,7 +48,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 };
             }
 
-            match std::fs::read_to_string(&path_str) {
+            match tokio::fs::read_to_string(&path_str).await {
                 Ok(content) => ToolResult {
                     content: truncate_output(&content, 120, 6000),
                     pending_diff: None,
@@ -69,13 +91,18 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
             let new_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
             let p = Path::new(&path_str);
-            if let Some(parent) = p.parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
+            if let Some(parent) = p.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let gitignore_updated = ensure_plan_in_gitignore(p);
-            let _ = std::fs::write(p, new_content);
+            let gitignore_updated = {
+                let owned = p.to_path_buf();
+                tokio::task::spawn_blocking(move || ensure_plan_in_gitignore(&owned))
+                    .await
+                    .unwrap_or(false)
+            };
+            let _ = tokio::fs::write(p, new_content).await;
 
             let gitignore_note = if gitignore_updated {
                 " (ajouté automatiquement au .gitignore)"
@@ -104,10 +131,23 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
             let (target_raw_path, new_content_str) = if let Some((p, c)) = files.first() {
                 (p.as_str(), c.as_str())
             } else {
-                let p = ["path", "file", "filepath", "file_path", "filename", "name", "target", "dest"]
-                    .iter()
-                    .find_map(|k| args.get(*k).and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()))
-                    .unwrap_or("");
+                let p = [
+                    "path",
+                    "file",
+                    "filepath",
+                    "file_path",
+                    "filename",
+                    "name",
+                    "target",
+                    "dest",
+                ]
+                .iter()
+                .find_map(|k| {
+                    args.get(*k)
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .unwrap_or("");
                 let c = ["content", "code", "text", "body", "source"]
                     .iter()
                     .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
@@ -120,7 +160,10 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
             if path_str.trim().is_empty() {
                 let serialized = serde_json::to_string(&args).unwrap_or_default();
                 return ToolResult {
-                    content: format!("Erreur: argument 'path' manquant. Args reçus: {}", truncate_output(&serialized, 2, 80)),
+                    content: format!(
+                        "Erreur: argument 'path' manquant. Args reçus: {}",
+                        truncate_output(&serialized, 2, 80)
+                    ),
                     pending_diff: None,
                 };
             }
@@ -130,33 +173,38 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 || clean_content.starts_with("[Contenu déjà fourni")
             {
                 return ToolResult {
-                    content: format!("⚠️ Erreur: Le contenu envoyé pour '{}' est un placeholder fictif ('[Contenu déjà fourni au tour précédent]'). Tu DOIS impérativement fournir le code source RÉEL et COMPLET du fichier dans l'argument 'content' !", path_str),
+                    content: format!(
+                        "⚠️ Erreur: Le contenu envoyé pour '{}' est un placeholder fictif ('[Contenu déjà fourni au tour précédent]'). Tu DOIS impérativement fournir le code source RÉEL et COMPLET du fichier dans l'argument 'content' !",
+                        path_str
+                    ),
                     pending_diff: None,
                 };
             }
 
-            let target_path = Path::new(&path_str);
-            ensure_plan_in_gitignore(target_path);
+            update_gitignore(Path::new(&path_str).to_path_buf()).await;
 
-            let old_content = std::fs::read_to_string(&path_str).unwrap_or_default();
+            let old_content = tokio::fs::read_to_string(&path_str)
+                .await
+                .unwrap_or_default();
             let diff_lines = computed_diff(&old_content, new_content_str);
 
             let pending_diff = PendingDiff {
-                id: format!(
-                    "diff_{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis()
-                ),
+                id: new_diff_id(),
                 path: path_str.clone(),
                 old_content,
                 new_content: new_content_str.to_string(),
                 diff_lines,
             };
 
+            // Register the generated content so `verify_project` can compile it
+            // on a temporary copy before the user accepts the diff.
+            stage_file(&path_str, new_content_str);
+
             ToolResult {
-                content: format!("OK: '{}' préparé (diff généré). Écris maintenant le prochain fichier manquant pour le projet (ex: composants, styles, scripts), ou termine avec ta conclusion textuelle si tous les fichiers sont prêts.", path_str),
+                content: format!(
+                    "OK: '{}' préparé (diff généré). Écris maintenant le prochain fichier manquant pour le projet (ex: composants, styles, scripts), ou termine avec ta conclusion textuelle si tous les fichiers sont prêts.",
+                    path_str
+                ),
                 pending_diff: Some(pending_diff),
             }
         }
@@ -169,16 +217,20 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .unwrap_or("");
             let path_str = resolve_tool_path(raw_path);
             let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            let replacement = args.get("replacement").and_then(|v| v.as_str()).unwrap_or("");
+            let replacement = args
+                .get("replacement")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             if path_str.trim().is_empty() || target.is_empty() {
                 return ToolResult {
-                    content: "Erreur: arguments 'path' et 'target' obligatoires pour edit_file.".to_string(),
+                    content: "Erreur: arguments 'path' et 'target' obligatoires pour edit_file."
+                        .to_string(),
                     pending_diff: None,
                 };
             }
 
-            let old_content = match std::fs::read_to_string(&path_str) {
+            let old_content = match tokio::fs::read_to_string(&path_str).await {
                 Ok(c) => c,
                 Err(e) => {
                     return ToolResult {
@@ -201,14 +253,11 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
             let new_content = old_content.replacen(target, replacement, 1);
             let diff_lines = computed_diff(&old_content, &new_content);
 
+            // Register the edited content for `verify_project`.
+            stage_file(&path_str, &new_content);
+
             let pending_diff = PendingDiff {
-                id: format!(
-                    "diff_{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis()
-                ),
+                id: new_diff_id(),
                 path: path_str.clone(),
                 old_content,
                 new_content,
@@ -216,7 +265,10 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
             };
 
             ToolResult {
-                content: format!("OK: '{}' modifié (diff généré). Poursuis les étapes suivantes.", path_str),
+                content: format!(
+                    "OK: '{}' modifié (diff généré). Poursuis les étapes suivantes.",
+                    path_str
+                ),
                 pending_diff: Some(pending_diff),
             }
         }
@@ -251,8 +303,8 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .filter(|t| !t.is_empty())
                 .collect();
 
-            match std::fs::read_dir(path) {
-                Ok(entries) => {
+            match tokio::fs::read_dir(path).await {
+                Ok(mut entries) => {
                     let mut lines = Vec::new();
                     const IGNORED_NAMES: &[&str] = &[
                         "target",
@@ -277,9 +329,12 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                         "yarn.lock",
                     ];
 
-                    for entry in entries.flatten() {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
                         let name = entry.file_name().to_string_lossy().to_string();
-                        if IGNORED_NAMES.iter().any(|ig| ig.eq_ignore_ascii_case(&name)) {
+                        if IGNORED_NAMES
+                            .iter()
+                            .any(|ig| ig.eq_ignore_ascii_case(&name))
+                        {
                             continue;
                         }
                         if !filter_tokens.is_empty() {
@@ -288,11 +343,11 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                                 continue;
                             }
                         }
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
                         if is_dir {
                             lines.push(format!("[DIR]  {}/", name));
                         } else {
-                            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                            let size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
                             lines.push(format!("[FILE] {} ({} octets)", name, size));
                         }
                     }
@@ -300,11 +355,17 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                     if lines.len() > 35 {
                         let total = lines.len();
                         lines.truncate(35);
-                        lines.push(format!("... ({} autres éléments omis — utilisez 'filter' ou 'search_files')", total - 35));
+                        lines.push(format!(
+                            "... ({} autres éléments omis — utilisez 'filter' ou 'search_files')",
+                            total - 35
+                        ));
                     }
                     let content = if lines.is_empty() {
                         if !filter_tokens.is_empty() {
-                            format!("Aucun fichier correspondant au filtre '{}' dans '{}'.", filter_str, path_str)
+                            format!(
+                                "Aucun fichier correspondant au filtre '{}' dans '{}'.",
+                                filter_str, path_str
+                            )
                         } else {
                             format!("Dossier '{}' vide.", path_str)
                         }
@@ -336,7 +397,8 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .or_else(|| args.get("file"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .trim();
+                .trim()
+                .to_string();
             let raw_dir = args
                 .get("path")
                 .or_else(|| args.get("dir"))
@@ -353,14 +415,37 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 };
             }
 
-            let mut matches = Vec::new();
-            search_dir_recursive(dir_path, query, 0, 5, &mut matches);
+            // The recursive walk reads many files synchronously: run it off the
+            // async runtime so the UI is never blocked.
+            let matches = {
+                let dir_owned = dir_path.to_path_buf();
+                let query_owned = query.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut out = Vec::new();
+                    search_dir_recursive(&dir_owned, &query_owned, 0, 5, &mut out);
+                    out
+                })
+                .await
+                .unwrap_or_default()
+            };
 
-            let label = if query.is_empty() { "*" } else { query };
-            let content = if matches.is_empty() {
-                format!("Aucune occurrence de '{}' trouvée dans '{}'.", label, dir_str)
+            let label = if query.is_empty() {
+                "*"
             } else {
-                format!("Résultats pour '{}' dans '{}':\n{}", label, dir_str, matches.join("\n"))
+                query.as_str()
+            };
+            let content = if matches.is_empty() {
+                format!(
+                    "Aucune occurrence de '{}' trouvée dans '{}'.",
+                    label, dir_str
+                )
+            } else {
+                format!(
+                    "Résultats pour '{}' dans '{}':\n{}",
+                    label,
+                    dir_str,
+                    matches.join("\n")
+                )
             };
 
             ToolResult {
@@ -392,9 +477,35 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 };
             }
 
+            // Sandbox: toute commande qui n'est pas en lecture seule doit être
+            // explicitement approuvée par l'utilisateur avant exécution.
+            if !is_pre_approved_command(cmd_str) {
+                let approved = request_command_approval(cmd_str, cwd_str).await;
+                if !approved {
+                    return ToolResult {
+                        content: "⛔ Commande refusée par l'utilisateur (elle n'a PAS été exécutée). N'insiste pas : propose une alternative plus sûre, ou demande à l'utilisateur de lancer la commande lui-même dans le terminal intégré.".to_string(),
+                        pending_diff: None,
+                    };
+                }
+            }
+
             let output = run_shell_command(cmd_str, cwd_str).await;
             ToolResult {
                 content: output,
+                pending_diff: None,
+            }
+        }
+
+        "verify_project" => {
+            let cwd = args
+                .get("cwd")
+                .or_else(|| args.get("path"))
+                .or_else(|| args.get("project"))
+                .or_else(|| args.get("dir"))
+                .and_then(|v| v.as_str())
+                .map(resolve_tool_path);
+            ToolResult {
+                content: run_verification(cwd.as_deref()).await,
                 pending_diff: None,
             }
         }
@@ -408,11 +519,11 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
 #[cfg(test)]
 mod tests {
+    use super::super::definitions::get_tool_definitions;
+    use super::super::fs::{dangerous_command_reason, is_pre_approved_command};
+    use super::super::thinking::{ThinkingFilter, format_thinking_in_text, strip_thinking_tags};
     use super::*;
     use serde_json::json;
-    use super::super::definitions::get_tool_definitions;
-    use super::super::fs::dangerous_command_reason;
-    use super::super::thinking::{format_thinking_in_text, strip_thinking_tags, ThinkingFilter};
 
     #[test]
     fn test_dangerous_commands_blocked() {
@@ -423,11 +534,29 @@ mod tests {
     }
 
     #[test]
+    fn test_pre_approved_commands() {
+        // Commandes d'inspection : exécutées sans confirmation.
+        assert!(is_pre_approved_command("echo hello"));
+        assert!(is_pre_approved_command("ls -la src"));
+        assert!(is_pre_approved_command("git status && git diff"));
+        assert!(is_pre_approved_command("cargo --version"));
+        // Commandes potentiellement mutantes : confirmation requise.
+        assert!(!is_pre_approved_command("cargo build"));
+        assert!(!is_pre_approved_command("npm install"));
+        assert!(!is_pre_approved_command("rm -f file.txt"));
+        assert!(!is_pre_approved_command("echo hi > out.txt"));
+        assert!(!is_pre_approved_command("ls $(pwd)"));
+    }
+
+    #[test]
     fn test_truncate_output() {
         let short = "Line 1\nLine 2";
         assert_eq!(truncate_output(short, 10, 100), short);
 
-        let long_lines = (1..=50).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let long_lines = (1..=50)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let truncated = truncate_output(&long_lines, 10, 10000);
         assert!(truncated.contains("omises pour préserver le contexte"));
         assert!(truncated.contains("Line 1"));
@@ -448,7 +577,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_definitions_valid() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 9);
         let names: Vec<_> = defs
             .iter()
             .filter_map(|d| d.get("function")?.get("name")?.as_str())
@@ -460,6 +589,7 @@ mod tests {
         assert!(names.contains(&"list_directory"));
         assert!(names.contains(&"search_files"));
         assert!(names.contains(&"run_command"));
+        assert!(names.contains(&"verify_project"));
         assert!(names.contains(&"ask_spec_questions"));
     }
 
@@ -472,10 +602,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_file_proposes_diff() {
-        let res = execute_native_tool("write_file", json!({ "path": "test_temp.txt", "content": "hello world\n" })).await;
+        let res = execute_native_tool(
+            "write_file",
+            json!({ "path": "test_temp.txt", "content": "hello world\n" }),
+        )
+        .await;
         assert!(res.pending_diff.is_some());
         let diff = res.pending_diff.unwrap();
-        assert_eq!(diff.path, "test_temp.txt");
+        // `resolve_tool_path` peut résoudre un nom relatif vers le dossier home :
+        // on vérifie donc le suffixe plutôt que l'égalité stricte.
+        assert!(
+            diff.path.ends_with("test_temp.txt"),
+            "chemin inattendu: {}",
+            diff.path
+        );
         assert_eq!(diff.new_content, "hello world\n");
     }
 
@@ -509,8 +649,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_command() {
-        let cmd = if cfg!(target_os = "windows") { "echo hello" } else { "echo hello" };
-        let res = execute_native_tool("run_command", json!({ "command": cmd })).await;
+        // "echo" est pré-approuvé : pas de confirmation requise dans les tests.
+        let res = execute_native_tool("run_command", json!({ "command": "echo hello" })).await;
         assert!(res.content.contains("hello"));
     }
 
@@ -603,7 +743,8 @@ mod tests {
         assert_eq!(chunk1, "Voici un menu concoté avec café et thé : ");
         let chunk2 = filter.process_chunk("<think>Réflexion sur les crêpes</think>Crêpes prêtes !");
         assert!(chunk2.contains("Crêpes prêtes !"));
-        assert!(!chunk2.contains("Réflexion"));
+        // Le contenu du raisonnement est masqué (la bannière « Réflexion en cours » reste visible).
+        assert!(!chunk2.contains("Réflexion sur les crêpes"));
     }
 
     #[test]
@@ -623,4 +764,3 @@ mod tests {
         assert!(properties.get("content").is_some());
     }
 }
-

@@ -1,12 +1,13 @@
 //! Chat panel, message bubbles, interactive spec questionnaire, and prompt input bar.
 
-use freya::prelude::*;
-use std::collections::HashMap;
 use crate::api;
 use crate::config;
-use crate::types::{extract_spec_payload, Message, Role};
+use crate::types::{Message, Role, extract_spec_payload};
+use freya::prelude::*;
+use std::collections::HashMap;
 
 /// Builds the full chat sidebar panel (scrollable messages, interactive cards, input area).
+#[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
 pub fn chat_panel(
     messages: Readable<Vec<Message>>,
     input_value: Writable<String>,
@@ -153,8 +154,8 @@ pub fn chat_panel(
                                 .font_size(13.),
                         );
 
-                    if let Some(summary) = &payload.context_summary {
-                        if !summary.trim().is_empty() {
+                    if let Some(summary) = &payload.context_summary
+                        && !summary.trim().is_empty() {
                             card = card.child(
                                 label()
                                     .text(summary.clone())
@@ -162,7 +163,6 @@ pub fn chat_panel(
                                     .font_size(12.),
                             );
                         }
-                    }
 
                     for (q_idx, q) in payload.questions.iter().enumerate() {
                         let q_key = if q.id.is_empty() {
@@ -185,8 +185,8 @@ pub fn chat_panel(
                                     .font_size(12.),
                             );
 
-                        if let Some(sec_note) = &q.security_note {
-                            if !sec_note.trim().is_empty() {
+                        if let Some(sec_note) = &q.security_note
+                            && !sec_note.trim().is_empty() {
                                 q_block = q_block.child(
                                     label()
                                         .text(format!("🔒 {}", sec_note))
@@ -194,7 +194,6 @@ pub fn chat_panel(
                                         .font_size(11.),
                                 );
                             }
-                        }
 
                         let mut opts_col = rect().width(Size::fill()).spacing(4.);
                         for opt in &q.options {
@@ -367,7 +366,14 @@ pub fn chat_panel(
     });
 
     let model_select = Select::new()
-        .selected_item(format!("🤖 {}", if active_model.is_empty() { "Choisir modèle" } else { &active_model }))
+        .selected_item(format!(
+            "🤖 {}",
+            if active_model.is_empty() {
+                "Choisir modèle"
+            } else {
+                &active_model
+            }
+        ))
         .children(model_items);
 
     let refresh_models_button = Button::new()
@@ -409,14 +415,30 @@ pub fn chat_panel(
     let mode_toggle_button = {
         let mut is_spec_mode = is_spec_mode;
         Button::new()
-            .background(if is_spec_val { Color::from_rgb(16, 185, 129) } else { c.surface_tertiary })
-            .hover_background(if is_spec_val { Color::from_rgb(5, 150, 105) } else { c.tertiary })
+            .background(if is_spec_val {
+                Color::from_rgb(16, 185, 129)
+            } else {
+                c.surface_tertiary
+            })
+            .hover_background(if is_spec_val {
+                Color::from_rgb(5, 150, 105)
+            } else {
+                c.tertiary
+            })
             .border_fill(Color::TRANSPARENT)
-            .color(if is_spec_val { Color::WHITE } else { c.text_primary })
+            .color(if is_spec_val {
+                Color::WHITE
+            } else {
+                c.text_primary
+            })
             .on_press(move |_| {
                 *is_spec_mode.write() = !is_spec_val;
             })
-            .child(if is_spec_val { "🛡️ Mode Spec" } else { "⚡ Quick Edit" })
+            .child(if is_spec_val {
+                "🛡️ Mode Spec"
+            } else {
+                "⚡ Quick Edit"
+            })
     };
 
     // Input area with text input and model selector bar
@@ -503,4 +525,3 @@ pub fn chat_panel(
         .child(chat_area)
         .child(input_area)
 }
-

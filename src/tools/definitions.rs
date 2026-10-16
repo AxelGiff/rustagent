@@ -1,7 +1,7 @@
 //! OpenAI-compatible tool definitions and schemas for native RustAgent tools.
 
-use serde_json::{json, Value};
 use crate::diff::PendingDiff;
+use serde_json::{Value, json};
 
 /// Result of executing a native tool.
 #[derive(Debug, Clone)]
@@ -154,6 +154,22 @@ pub fn get_tool_definitions() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "verify_project",
+                "description": "Compile et teste le projet sur une COPIE TEMPORAIRE (le projet réel n'est pas modifié). Détecte automatiquement le type de projet (Cargo.toml → cargo check, package.json → npm install + build, tsconfig.json → tsc --noEmit, fichiers .js → node --check, .py → py_compile, go.mod → go build) et renvoie les erreurs. À appeler OBLIGATOIREMENT après avoir écrit les fichiers, puis corriger et rappeler jusqu'à ce que ça passe.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "cwd": {
+                            "type": "string",
+                            "description": "Dossier racine du projet à vérifier (ex: 'Pictures/montage-pc'). Optionnel : déduit des fichiers déjà écrits si absent."
+                        }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "ask_spec_questions",
                 "description": "Pose 1 à 3 questions rapides à choix multiples à l'utilisateur pour clarifier les spécifications et les choix Security by Design avant de coder. Chaque question affichera automatiquement un champ 'Autre' dans l'interface.",
                 "parameters": {
@@ -204,4 +220,3 @@ pub fn get_tool_definitions() -> Vec<Value> {
         }),
     ]
 }
-

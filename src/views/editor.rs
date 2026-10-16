@@ -5,6 +5,7 @@ use freya::prelude::*;
 
 /// Builds the code editor pane. The editor state is lifted up into `app()` so
 /// that the chat and terminal panels can read/write the same content.
+#[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
 pub fn code_editor_panel(
     editor: Writable<CodeEditorData>,
     file_name: String,
@@ -56,7 +57,10 @@ pub fn code_editor_panel(
                                 .child(format!("📝 Diff en attente ({})", has_pending_diffs))
                                 .into_element()
                         } else {
-                            rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                            rect()
+                                .width(Size::px(0.))
+                                .height(Size::px(0.))
+                                .into_element()
                         }),
                 )
                 .child(
@@ -93,7 +97,10 @@ pub fn code_editor_panel(
 }
 
 /// Helper function to create a clean CodeEditorData without stale AST nodes from previous files.
-pub fn create_editor_data(content: &str, language: Option<crate::language::SupportedLanguage>) -> CodeEditorData {
+pub fn create_editor_data(
+    content: &str,
+    language: Option<crate::language::SupportedLanguage>,
+) -> CodeEditorData {
     let rope = ropey::Rope::from_str(content);
     let editor_lang = language.map(|l| l.editor_language());
     let mut data = CodeEditorData::new(rope, editor_lang);
@@ -112,7 +119,10 @@ pub fn update_editor_if_matching(
     mut current_language: State<crate::language::SupportedLanguage>,
 ) {
     if crate::diff::matches_open_editor(diff_path, file_name) {
-        let ext = std::path::Path::new(diff_path).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext = std::path::Path::new(diff_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
         let lang = crate::language::SupportedLanguage::from_extension(ext);
         if let Some(l) = lang {
             *current_language.write() = l;
@@ -120,4 +130,3 @@ pub fn update_editor_if_matching(
         *editor.write() = create_editor_data(content, lang);
     }
 }
-

@@ -1,29 +1,26 @@
 //! Specification questions, architecture plans, and project snapshot detection.
 
-use std::path::Path;
-use serde_json::{json, Value};
 use super::fs::{resolve_tool_path, search_dir_recursive, truncate_output, user_home_dir};
+use serde_json::{Value, json};
+use std::path::Path;
 
 /// Si un fichier `plan.md` est généré ou modifié, garantit qu'il est inscrit dans le `.gitignore`
 /// du dossier cible (ou de ses parents proches) s'il existe un `.gitignore`.
 pub fn ensure_plan_in_gitignore(plan_path: &Path) -> bool {
-    let file_name = plan_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+    let file_name = plan_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if !file_name.eq_ignore_ascii_case("plan.md") {
         return false;
     }
 
     let mut candidate_dirs = Vec::new();
-    if let Some(parent) = plan_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            candidate_dirs.push(parent.to_path_buf());
-            if let Some(grand_parent) = parent.parent() {
-                if !grand_parent.as_os_str().is_empty() {
-                    candidate_dirs.push(grand_parent.to_path_buf());
-                }
-            }
+    if let Some(parent) = plan_path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        candidate_dirs.push(parent.to_path_buf());
+        if let Some(grand_parent) = parent.parent()
+            && !grand_parent.as_os_str().is_empty()
+        {
+            candidate_dirs.push(grand_parent.to_path_buf());
         }
     }
     candidate_dirs.push(std::path::PathBuf::from("."));
@@ -42,7 +39,8 @@ pub fn ensure_plan_in_gitignore(plan_path: &Path) -> bool {
                     if !new_gitignore.ends_with('\n') && !new_gitignore.is_empty() {
                         new_gitignore.push('\n');
                     }
-                    new_gitignore.push_str("\n# RustAgent Specification Plan\nplan.md\n**/plan.md\n");
+                    new_gitignore
+                        .push_str("\n# RustAgent Specification Plan\nplan.md\n**/plan.md\n");
                     if std::fs::write(&gitignore_path, new_gitignore).is_ok() {
                         updated = true;
                     }
@@ -196,14 +194,14 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
             }
             Value::String(s) => {
                 let trimmed = s.trim();
-                if let Ok(parsed_arr) = serde_json::from_str::<Value>(trimmed) {
-                    if parsed_arr.is_array() {
-                        for item in parsed_arr.as_array().unwrap() {
-                            if let Some(st) = item.as_str() {
-                                if !st.trim().is_empty() {
-                                    opts.push(st.trim().to_string());
-                                }
-                            }
+                if let Ok(parsed_arr) = serde_json::from_str::<Value>(trimmed)
+                    && parsed_arr.is_array()
+                {
+                    for item in parsed_arr.as_array().unwrap() {
+                        if let Some(st) = item.as_str()
+                            && !st.trim().is_empty()
+                        {
+                            opts.push(st.trim().to_string());
                         }
                     }
                 }
@@ -253,7 +251,16 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
             }
             Value::Object(map) => {
                 let mut q_text = String::new();
-                for k in &["question", "text", "title", "label", "prompt", "ask", "description", "name"] {
+                for k in &[
+                    "question",
+                    "text",
+                    "title",
+                    "label",
+                    "prompt",
+                    "ask",
+                    "description",
+                    "name",
+                ] {
                     if let Some(s) = map.get(*k).and_then(|v| v.as_str()) {
                         let t = s.trim();
                         if !t.is_empty() {
@@ -273,7 +280,14 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
                     .unwrap_or_else(|| format!("q_{}", idx + 1));
 
                 let mut raw_opts = &Value::Null;
-                for k in &["options", "choices", "items", "values", "answers", "propositions"] {
+                for k in &[
+                    "options",
+                    "choices",
+                    "items",
+                    "values",
+                    "answers",
+                    "propositions",
+                ] {
                     if let Some(v) = map.get(*k) {
                         raw_opts = v;
                         break;
@@ -311,7 +325,14 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
             raw_items.extend(arr.iter().cloned());
         }
         Value::Object(map) => {
-            for key in &["questions", "items", "specs", "clarifications", "choices", "list"] {
+            for key in &[
+                "questions",
+                "items",
+                "specs",
+                "clarifications",
+                "choices",
+                "list",
+            ] {
                 if let Some(v) = map.get(*key) {
                     match v {
                         Value::Array(arr) => {
@@ -329,7 +350,11 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
                                 }
                             }
                             for line in s.lines() {
-                                let clean = line.trim().trim_start_matches('-').trim_start_matches('*').trim();
+                                let clean = line
+                                    .trim()
+                                    .trim_start_matches('-')
+                                    .trim_start_matches('*')
+                                    .trim();
                                 if !clean.is_empty() {
                                     raw_items.push(Value::String(clean.to_string()));
                                 }
@@ -366,10 +391,10 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
                                 "question": k,
                                 "options": v
                             }));
-                        } else if let Some(s) = v.as_str() {
-                            if s.contains('?') {
-                                raw_items.push(Value::String(s.to_string()));
-                            }
+                        } else if let Some(s) = v.as_str()
+                            && s.contains('?')
+                        {
+                            raw_items.push(Value::String(s.to_string()));
                         }
                     }
                 }
@@ -403,8 +428,16 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
 
     let mut candidate_dirs: Vec<std::path::PathBuf> = Vec::new();
 
-    for raw_token in combined.split(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | ':')) {
-        let token = raw_token.trim().trim_matches(|c: char| c == '.' || c == ',' || c == ';');
+    for raw_token in combined.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';' | ':'
+            )
+    }) {
+        let token = raw_token
+            .trim()
+            .trim_matches(|c: char| c == '.' || c == ',' || c == ';');
         if token.len() < 3 {
             continue;
         }
@@ -414,17 +447,30 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
             let dir = if p.is_dir() {
                 Some(p.to_path_buf())
             } else {
-                p.parent().filter(|par| par.is_dir()).map(|par| par.to_path_buf())
+                p.parent()
+                    .filter(|par| par.is_dir())
+                    .map(|par| par.to_path_buf())
             };
-            if let Some(d) = dir {
-                if !candidate_dirs.contains(&d) {
-                    candidate_dirs.push(d);
-                }
+            if let Some(d) = dir
+                && !candidate_dirs.contains(&d)
+            {
+                candidate_dirs.push(d);
             }
         } else if (token.contains('-') || token.contains('_')) && !token.starts_with('-') {
             if let Some(home) = user_home_dir() {
-                for sub in &["Pictures", "Documents", "Desktop", "Projects", "Downloads", ""] {
-                    let base = if sub.is_empty() { home.clone() } else { home.join(sub) };
+                for sub in &[
+                    "Pictures",
+                    "Documents",
+                    "Desktop",
+                    "Projects",
+                    "Downloads",
+                    "",
+                ] {
+                    let base = if sub.is_empty() {
+                        home.clone()
+                    } else {
+                        home.join(sub)
+                    };
                     let cand = base.join(token);
                     if cand.is_dir() && !candidate_dirs.contains(&cand) {
                         candidate_dirs.push(cand);
@@ -440,15 +486,15 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
 
     let cwd = std::env::current_dir().ok();
     let target_dir = candidate_dirs.into_iter().find(|d| {
-        if let Some(ref c) = cwd {
-            if d == c {
-                return false;
-            }
+        if let Some(ref c) = cwd
+            && d == c
+        {
+            return false;
         }
-        if let Some(home) = user_home_dir() {
-            if d == &home {
-                return false;
-            }
+        if let Some(home) = user_home_dir()
+            && d == &home
+        {
+            return false;
         }
         true
     });
@@ -489,14 +535,18 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
 /// Génère et enregistre instantanément (0 ms, sans appel LLM) le fichier `plan.md`
 /// et l'ajoute au `.gitignore` dès que l'utilisateur valide ses réponses aux spécifications.
 pub fn write_auto_plan(user_msg: &str, history_texts: &[String]) -> Option<String> {
-    if !user_msg.contains("[RÉPONSES AUX SPÉCIFICATIONS]") && !user_msg.to_lowercase().contains("fais au mieux") {
+    if !user_msg.contains("[RÉPONSES AUX SPÉCIFICATIONS]")
+        && !user_msg.to_lowercase().contains("fais au mieux")
+    {
         return None;
     }
 
     let original_request = history_texts
         .iter()
         .rev()
-        .find(|t| !t.contains("SPEC_QUESTIONS_JSON:") && !t.starts_with("Hello!") && !t.starts_with("⚠️"))
+        .find(|t| {
+            !t.contains("SPEC_QUESTIONS_JSON:") && !t.starts_with("Hello!") && !t.starts_with("⚠️")
+        })
         .cloned()
         .unwrap_or_default();
 
@@ -511,4 +561,3 @@ pub fn write_auto_plan(user_msg: &str, history_texts: &[String]) -> Option<Strin
     let _ = std::fs::write(plan_path, &plan_md);
     Some("plan.md".to_string())
 }
-

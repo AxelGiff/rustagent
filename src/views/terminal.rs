@@ -1,10 +1,10 @@
 //! Integrated terminal panel component.
 
+use crate::platform;
 use freya::clipboard::Clipboard;
 use freya::prelude::*;
 use freya::terminal::*;
 use futures_util::FutureExt;
-use crate::platform;
 
 /// Spawn a fresh terminal and return its handle (or None on failure).
 /// The shell and environment are chosen per-platform via the `platform` module.
@@ -28,11 +28,19 @@ pub fn normalize_osc7_path(raw: std::path::PathBuf) -> std::path::PathBuf {
     if cfg!(windows) {
         // Convertir un chemin MSYS2 de type `/c/Users/...` ou `c/Users/...` en `C:/Users/...`
         let bytes = trimmed.as_bytes();
-        if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b'/'
+        {
             let drive = (bytes[1] as char).to_ascii_uppercase();
             return std::path::PathBuf::from(format!("{}:{}", drive, &trimmed[2..]));
         }
-        if bytes.len() >= 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {
+        if bytes.len() >= 2
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b'/'
+        {
             let drive = (bytes[0] as char).to_ascii_uppercase();
             return std::path::PathBuf::from(format!("{}:{}", drive, &trimmed[1..]));
         }
@@ -237,4 +245,3 @@ pub fn terminal_panel(
             "Terminal exited".into_element()
         })
 }
-

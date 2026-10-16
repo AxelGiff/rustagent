@@ -13,16 +13,17 @@ mod language;
 mod mcp;
 mod myers;
 mod platform;
+mod session;
 mod theme;
 mod tools;
 mod types;
 mod views;
 
+use freya::prelude::*;
 pub use language::SupportedLanguage;
+use tokio::runtime::Builder;
 pub use types::*;
 use views::*;
-use freya::prelude::*;
-use tokio::runtime::Builder;
 
 /// Returns `true` if a chat message should be sent to the LLM.
 fn should_send_message(message: &str) -> bool {
@@ -75,11 +76,34 @@ fn app() -> impl IntoElement {
     let spec_selected_options = use_state(std::collections::HashMap::<String, String>::new);
     let spec_custom_input = use_state(String::new);
 
+    // Command approval: the assistant's shell commands must be confirmed by the
+    // user. The agent loop blocks asynchronously on a channel that the
+    // confirmation bar's buttons resolve.
+    let pending_command = use_state(|| None::<tools::PendingCommand>);
+    use_future(move || {
+        let mut pending_command = pending_command;
+        async move {
+            let mut rx = tools::subscribe();
+            while rx.changed().await.is_ok() {
+                let value = rx.borrow().clone();
+                *pending_command.write() = value;
+            }
+        }
+    });
+
     let show_settings = use_state(|| false);
     let saved_cfg = config::ApiKeyConfig::load();
     let settings_key_input = use_state(|| saved_cfg.key);
-    let settings_model_input = use_state(|| saved_cfg.model.unwrap_or_else(|| agent::ALBERT_MODEL.to_string()));
-    let settings_endpoint_input = use_state(|| saved_cfg.endpoint.unwrap_or_else(|| agent::ALBERT_ENDPOINT.to_string()));
+    let settings_model_input = use_state(|| {
+        saved_cfg
+            .model
+            .unwrap_or_else(|| agent::ALBERT_MODEL.to_string())
+    });
+    let settings_endpoint_input = use_state(|| {
+        saved_cfg
+            .endpoint
+            .unwrap_or_else(|| agent::ALBERT_ENDPOINT.to_string())
+    });
     let available_models = use_state(Vec::<String>::new);
     let models_loading = use_state(|| false);
     let settings_feedback = use_state(String::new);
@@ -95,10 +119,10 @@ fn app() -> impl IntoElement {
         spawn(async move {
             if !k.is_empty() {
                 *models_loading.write() = true;
-                if let Ok(m) = api::fetch_models(&ep, &k).await {
-                    if !m.is_empty() {
-                        *available_models.write() = m;
-                    }
+                if let Ok(m) = api::fetch_models(&ep, &k).await
+                    && !m.is_empty()
+                {
+                    *available_models.write() = m;
                 }
                 *models_loading.write() = false;
             }
@@ -154,9 +178,6 @@ if __name__ == "__main__":
     };
 
     let refresh_models = {
-        let available_models = available_models;
-        let models_loading = models_loading;
-        let settings_feedback = settings_feedback;
         let endpoint_val = settings_endpoint_input.read().clone();
         let key_val = settings_key_input.read().clone();
         move |_| {
@@ -191,7 +212,11 @@ if __name__ == "__main__":
             let cfg = config::ApiKeyConfig {
                 key: key.clone(),
                 model: if model.is_empty() { None } else { Some(model) },
-                endpoint: if endpoint.is_empty() { None } else { Some(endpoint) },
+                endpoint: if endpoint.is_empty() {
+                    None
+                } else {
+                    Some(endpoint)
+                },
                 source: config::KeySource::ConfigFile,
             };
             match cfg.validate() {
@@ -220,9 +245,6 @@ if __name__ == "__main__":
 
     let accept_diff = {
         let mut pending_diffs = pending_diffs;
-        let editor = editor;
-        let current_language = current_language;
-        let file_name = file_name;
         let mut messages = messages;
         let mut center_view_mode = center_view_mode;
         move |idx: usize| {
@@ -238,10 +260,19 @@ if __name__ == "__main__":
             };
             if let Some(diff) = diff_opt {
                 if let Err(e) = diff::apply_diff_to_disk(&diff) {
-                    messages.write().push(Message { role: Role::AI, content: e });
+                    messages.write().push(Message {
+                        role: Role::AI,
+                        content: e,
+                    });
                     return;
                 }
-                update_editor_if_matching(&diff.path, &diff.new_content, &file_name.read(), editor, current_language);
+                update_editor_if_matching(
+                    &diff.path,
+                    &diff.new_content,
+                    &file_name.read(),
+                    editor,
+                    current_language,
+                );
                 messages.write().push(Message {
                     role: Role::AI,
                     content: format!("✅ Modifications validées et appliquées à `{}`.", diff.path),
@@ -255,9 +286,6 @@ if __name__ == "__main__":
 
     let accept_all_diffs = {
         let mut pending_diffs = pending_diffs;
-        let editor = editor;
-        let current_language = current_language;
-        let file_name = file_name;
         let mut messages = messages;
         let mut center_view_mode = center_view_mode;
         move || {
@@ -265,16 +293,28 @@ if __name__ == "__main__":
             let mut count = 0;
             for diff in &diffs {
                 if let Err(e) = diff::apply_diff_to_disk(diff) {
-                    messages.write().push(Message { role: Role::AI, content: e });
+                    messages.write().push(Message {
+                        role: Role::AI,
+                        content: e,
+                    });
                     continue;
                 }
                 count += 1;
-                update_editor_if_matching(&diff.path, &diff.new_content, &file_name.read(), editor, current_language);
+                update_editor_if_matching(
+                    &diff.path,
+                    &diff.new_content,
+                    &file_name.read(),
+                    editor,
+                    current_language,
+                );
             }
             if count > 0 {
                 messages.write().push(Message {
                     role: Role::AI,
-                    content: format!("✅ {} modification(s) validée(s) et appliquées sur le disque.", count),
+                    content: format!(
+                        "✅ {} modification(s) validée(s) et appliquées sur le disque.",
+                        count
+                    ),
                 });
             }
             *center_view_mode.write() = CenterViewMode::Editor;
@@ -285,9 +325,6 @@ if __name__ == "__main__":
         let mut pending_diffs = pending_diffs;
         let mut messages = messages;
         let mut center_view_mode = center_view_mode;
-        let editor = editor;
-        let current_language = current_language;
-        let file_name = file_name;
         move |idx: usize| {
             let diff_opt = {
                 let mut diffs = pending_diffs.write();
@@ -300,7 +337,13 @@ if __name__ == "__main__":
                 }
             };
             if let Some(diff) = diff_opt {
-                update_editor_if_matching(&diff.path, &diff.old_content, &file_name.read(), editor, current_language);
+                update_editor_if_matching(
+                    &diff.path,
+                    &diff.old_content,
+                    &file_name.read(),
+                    editor,
+                    current_language,
+                );
                 messages.write().push(Message {
                     role: Role::AI,
                     content: format!("❌ Modification pour `{}` rejetée.", diff.path),
@@ -316,13 +359,16 @@ if __name__ == "__main__":
         let mut pending_diffs = pending_diffs;
         let mut messages = messages;
         let mut center_view_mode = center_view_mode;
-        let editor = editor;
-        let current_language = current_language;
-        let file_name = file_name;
         move || {
             let diffs = pending_diffs.write().drain(..).collect::<Vec<_>>();
             for diff in &diffs {
-                update_editor_if_matching(&diff.path, &diff.old_content, &file_name.read(), editor, current_language);
+                update_editor_if_matching(
+                    &diff.path,
+                    &diff.old_content,
+                    &file_name.read(),
+                    editor,
+                    current_language,
+                );
             }
             let count = diffs.len();
             messages.write().push(Message {
@@ -356,12 +402,8 @@ if __name__ == "__main__":
         let mut messages = messages;
         let mut input_value = input_value;
         let mut editor = editor;
-        let current_language = current_language;
         let mut file_name = file_name;
-        let pending_diffs = pending_diffs;
-        let center_view_mode = center_view_mode;
         let mut is_generating = is_generating;
-        let is_spec_mode = is_spec_mode;
         move |user_message: String| {
             if !should_send_message(&user_message) {
                 return;
@@ -411,13 +453,18 @@ if __name__ == "__main__":
                 let mut pending_diffs_for_cb = pending_diffs_stream;
                 let mut center_view_for_cb = center_view_mode_stream;
 
+                // Snapshot AVANT l'appel asynchrone : sinon le guard de lecture de
+                // `pending_diffs_stream` reste vivant pendant tout le `.await` et le
+                // callback `on_pending_diff` panique ("State already borrowed").
+                let pending_diffs_snapshot = pending_diffs_stream.read().clone();
+
                 let result = agent::run_agent_turn(
                     user_message,
                     spec_mode,
                     history_snapshot,
                     current_editor_code,
                     current_editor_file,
-                    pending_diffs_stream.read().clone(),
+                    pending_diffs_snapshot,
                     wants_code,
                     detected_language,
                     |chunk| {
@@ -447,9 +494,13 @@ if __name__ == "__main__":
                     Err(friendly) => {
                         if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
                             if msg.content.trim().is_empty() {
-                                msg.content = format!("⚠️ **Erreur lors de l'appel :**\n\n{}", friendly);
+                                msg.content =
+                                    format!("⚠️ **Erreur lors de l'appel :**\n\n{}", friendly);
                             } else {
-                                msg.content.push_str(&format!("\n\n⚠️ **Erreur lors de l'appel :**\n\n{}", friendly));
+                                msg.content.push_str(&format!(
+                                    "\n\n⚠️ **Erreur lors de l'appel :**\n\n{}",
+                                    friendly
+                                ));
                             }
                         }
                     }
@@ -460,9 +511,6 @@ if __name__ == "__main__":
 
     let execute_code = {
         let mut messages = messages;
-        let editor = editor;
-        let current_language = current_language;
-        let terminal_handle = terminal_handle;
         move || {
             let code_content = editor.read().rope.to_string();
             let language = *current_language.read();
@@ -499,8 +547,6 @@ if __name__ == "__main__":
 
     let save_file = {
         let mut messages = messages;
-        let file_name = file_name;
-        let editor = editor;
         move || {
             let path_str = file_name.read().clone();
             let code_content = editor.read().rope.to_string();
@@ -533,7 +579,8 @@ if __name__ == "__main__":
             .unwrap_or(f)
     };
 
-    let is_diff_view = *center_view_mode.read() == CenterViewMode::Diff && !pending_diffs.read().is_empty();
+    let is_diff_view =
+        *center_view_mode.read() == CenterViewMode::Diff && !pending_diffs.read().is_empty();
     let center_top_panel = if is_diff_view {
         diff_viewer_panel(
             pending_diffs.into(),
@@ -542,7 +589,7 @@ if __name__ == "__main__":
             reject_diff,
             reject_all_diffs,
             {
-                let mut center_view_mode = center_view_mode.clone();
+                let mut center_view_mode = center_view_mode;
                 move || {
                     *center_view_mode.write() = CenterViewMode::Editor;
                 }
@@ -556,7 +603,7 @@ if __name__ == "__main__":
             file_name.read().clone(),
             pending_diffs.read().len(),
             {
-                let mut center_view_mode = center_view_mode.clone();
+                let mut center_view_mode = center_view_mode;
                 move || {
                     *center_view_mode.write() = CenterViewMode::Diff;
                 }
@@ -594,10 +641,7 @@ if __name__ == "__main__":
         open_file.clone(),
     );
 
-    let terminal = terminal_panel(
-        terminal_handle.into_writable(),
-        current_dir.into_writable(),
-    );
+    let terminal = terminal_panel(terminal_handle.into_writable(), current_dir.into_writable());
 
     let toolbar = app_toolbar(
         current_theme.into_writable(),
@@ -614,33 +658,36 @@ if __name__ == "__main__":
 
     let main_workspace = main_workspace_layout(file_tree, center_top_panel, terminal, chat);
 
+    let mut root = rect()
+        .expanded()
+        .background(c.background)
+        .content(Content::Flex);
+
     if *show_settings.read() {
-        rect()
-            .expanded()
-            .background(c.background)
-            .content(Content::Flex)
-            .child(
-                settings_page_view(
-                    c.clone(),
-                    settings_key_input.into(),
-                    settings_model_input.into(),
-                    settings_endpoint_input.into(),
-                    available_models.into(),
-                    models_loading.into(),
-                    settings_feedback.into(),
-                    refresh_models,
-                    save_api_key,
-                    close_settings,
-                ),
-            )
+        root = root.child(settings_page_view(
+            c.clone(),
+            settings_key_input.into(),
+            settings_model_input.into(),
+            settings_endpoint_input.into(),
+            available_models.into(),
+            models_loading.into(),
+            settings_feedback.into(),
+            refresh_models,
+            save_api_key,
+            close_settings,
+        ));
     } else {
-        rect()
-            .expanded()
-            .background(c.background)
-            .content(Content::Flex)
+        root = root
             .child(toolbar)
-            .child(rect().expanded().child(main_workspace))
+            .child(rect().expanded().child(main_workspace));
     }
+
+    // Command confirmation bar, spanning the whole window.
+    if let Some(command) = pending_command.read().clone() {
+        root = root.child(command_confirmation_bar(command, c.clone()));
+    }
+
+    root
 }
 
 #[cfg(test)]

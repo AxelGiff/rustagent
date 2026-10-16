@@ -1,9 +1,10 @@
 //! Application settings view page component.
 
-use freya::prelude::*;
 use crate::config;
+use freya::prelude::*;
 
 /// A dedicated, accessible full-page settings view.
+#[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
 pub fn settings_page_view<H0, H1, H2>(
     c: ColorsSheet,
     key_input: Writable<String>,
@@ -321,4 +322,3 @@ where
                 ),
         )
 }
-

@@ -112,7 +112,8 @@ pub fn decide_editor_action(
 /// or if a file with matching extension exists in the workspace.
 pub fn find_target_file(user_message: &str, current_file: &str) -> Option<String> {
     for word in user_message.split_whitespace() {
-        let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\');
+        let clean =
+            word.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '/' && c != '\\');
         if clean.contains('.') && std::path::Path::new(clean).exists() {
             return Some(clean.to_string());
         }
@@ -175,7 +176,10 @@ fn html_title(code: &str) -> Option<String> {
     let lower = code.to_lowercase();
     let start = lower.find("<title>")? + "<title>".len();
     let end = lower.get(start..)?.find("</title>")? + start;
-    let title = code.get(start..end).unwrap_or_else(|| lower.get(start..end).unwrap_or("")).trim();
+    let title = code
+        .get(start..end)
+        .unwrap_or_else(|| lower.get(start..end).unwrap_or(""))
+        .trim();
     if title.is_empty() {
         None
     } else {
@@ -1251,4 +1255,3 @@ mod tests {
         );
     }
 }
-
