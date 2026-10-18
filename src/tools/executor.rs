@@ -30,6 +30,85 @@ fn new_diff_id() -> String {
     )
 }
 
+/// `read_file` output size: large enough to see a real source file, bounded to
+/// protect the context window.
+const READ_MAX_LINES: usize = 500;
+const READ_MAX_CHARS: usize = 24_000;
+
+/// Byte offset of the start of each line in `content`.
+fn line_starts(content: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, b) in content.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Locate the block of `content` matching `target`, tolerating differences in
+/// leading/trailing whitespace and indentation between lines.
+///
+/// First tries an exact substring match, then matches line by line on trimmed
+/// content. Returns the byte range `[start, end)` to replace.
+fn find_matching_block(content: &str, target: &str) -> Option<(usize, usize)> {
+    if let Some(start) = content.find(target) {
+        return Some((start, start + target.len()));
+    }
+
+    let target_lines: Vec<&str> = target.lines().collect();
+    // Ignore leading/trailing blank lines in the target.
+    let mut lo = 0usize;
+    let mut hi = target_lines.len();
+    while lo < hi && target_lines[lo].trim().is_empty() {
+        lo += 1;
+    }
+    while hi > lo && target_lines[hi - 1].trim().is_empty() {
+        hi -= 1;
+    }
+    if lo >= hi {
+        return None;
+    }
+    let needle: Vec<&str> = target_lines[lo..hi].to_vec();
+
+    let content_lines: Vec<&str> = content.lines().collect();
+    if needle.len() > content_lines.len() {
+        return None;
+    }
+    let starts = line_starts(content);
+
+    for i in 0..=(content_lines.len() - needle.len()) {
+        if needle
+            .iter()
+            .enumerate()
+            .all(|(j, n)| content_lines[i + j].trim() == n.trim())
+        {
+            let start = starts[i];
+            let last = i + needle.len() - 1;
+            let end = starts[last] + content_lines[last].len();
+            return Some((start, end));
+        }
+    }
+    None
+}
+
+/// Slice `content` to an inclusive 1-based line range; returns the slice and the
+/// effective `(start, end)` line numbers.
+fn slice_line_range(
+    content: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> (String, usize, usize) {
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return (String::new(), 0, 0);
+    }
+    let start = start_line.unwrap_or(1).clamp(1, total);
+    let end = end_line.unwrap_or(total).clamp(start, total);
+    (lines[start - 1..end].join("\n"), start, end)
+}
+
 /// Executes a native tool by name with the given JSON arguments.
 pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
     match name {
@@ -48,15 +127,53 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 };
             }
 
-            match tokio::fs::read_to_string(&path_str).await {
-                Ok(content) => ToolResult {
-                    content: truncate_output(&content, 120, 6000),
-                    pending_diff: None,
+            // Prefer the content generated earlier in this turn (diffs are not on
+            // disk until the user validates them), then fall back to disk.
+            let (full, staged) = match super::verify::staged_content(&path_str) {
+                Some(c) => (c, true),
+                None => match tokio::fs::read_to_string(&path_str).await {
+                    Ok(c) => (c, false),
+                    Err(e) => {
+                        return ToolResult {
+                            content: format!(
+                                "Erreur lors de la lecture du fichier '{}': {}. Si ce fichier n'existe pas encore, crée-le avec 'write_file'.",
+                                path_str, e
+                            ),
+                            pending_diff: None,
+                        };
+                    }
                 },
-                Err(e) => ToolResult {
-                    content: format!("Erreur lors de la lecture du fichier '{}': {}", path_str, e),
-                    pending_diff: None,
-                },
+            };
+
+            let start_line = args
+                .get("start_line")
+                .or_else(|| args.get("from_line"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let end_line = args
+                .get("end_line")
+                .or_else(|| args.get("to_line"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let total_lines = full.lines().count();
+            let (slice, start, end) = slice_line_range(&full, start_line, end_line);
+
+            let mut content = truncate_output(&slice, READ_MAX_LINES, READ_MAX_CHARS);
+            if start_line.is_some() || end_line.is_some() {
+                content.push_str(&format!(
+                    "\n\n[i] Extraits des lignes {}-{} sur {}.",
+                    start, end, total_lines
+                ));
+            }
+            if staged {
+                content.push_str(
+                    "\n\n[i] Contenu généré dans ce tour, pas encore écrit sur le disque (diff en attente de validation).",
+                );
+            }
+
+            ToolResult {
+                content,
+                pending_diff: None,
             }
         }
 
@@ -216,41 +333,72 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let path_str = resolve_tool_path(raw_path);
-            let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("");
-            let replacement = args
-                .get("replacement")
-                .and_then(|v| v.as_str())
+            let target = ["target", "old_string", "old", "find", "search"]
+                .iter()
+                .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
                 .unwrap_or("");
+            let replacement = ["replacement", "new_string", "new", "replace"]
+                .iter()
+                .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let replace_all = args
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             if path_str.trim().is_empty() || target.is_empty() {
                 return ToolResult {
-                    content: "Erreur: arguments 'path' et 'target' obligatoires pour edit_file."
+                    content: "Erreur: arguments 'path' et 'target' obligatoires pour edit_file ('target' = extrait EXACT du fichier à remplacer)."
                         .to_string(),
                     pending_diff: None,
                 };
             }
 
-            let old_content = match tokio::fs::read_to_string(&path_str).await {
-                Ok(c) => c,
-                Err(e) => {
-                    return ToolResult {
-                        content: format!("Erreur lors de la lecture de '{}': {}", path_str, e),
-                        pending_diff: None,
-                    };
+            // Edit the content generated earlier in this turn if any, else disk.
+            let old_content = match super::verify::staged_content(&path_str) {
+                Some(c) => c,
+                None => match tokio::fs::read_to_string(&path_str).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return ToolResult {
+                            content: format!(
+                                "Erreur: impossible de lire '{}' ({}). Pour créer un fichier qui n'existe pas encore, utilise 'write_file'.",
+                                path_str, e
+                            ),
+                            pending_diff: None,
+                        };
+                    }
+                },
+            };
+
+            let exact = old_content.contains(target);
+            let new_content = if replace_all && exact {
+                old_content.replace(target, replacement)
+            } else {
+                match find_matching_block(&old_content, target) {
+                    Some((start, end)) => {
+                        let mut s = String::with_capacity(old_content.len() + replacement.len());
+                        s.push_str(&old_content[..start]);
+                        s.push_str(replacement);
+                        s.push_str(&old_content[end..]);
+                        s
+                    }
+                    None => {
+                        // Show the actual content so the model can copy an exact
+                        // snippet and retry immediately, instead of failing the
+                        // whole turn (which forced the user to re-prompt).
+                        let preview = truncate_output(&old_content, 200, 8000);
+                        return ToolResult {
+                            content: format!(
+                                "⚠️ `edit_file` a échoué : le texte 'target' n'a pas été trouvé dans '{}' (recherche exacte, puis tolérante aux espaces/indentation).\nRecopie un extrait EXACT depuis le contenu ci-dessous dans 'target', puis réessaie (tu peux aussi rappeler `read_file`).\n\n--- CONTENU ACTUEL DE '{}' ---\n{}",
+                                path_str, path_str, preview
+                            ),
+                            pending_diff: None,
+                        };
+                    }
                 }
             };
 
-            if !old_content.contains(target) {
-                return ToolResult {
-                    content: format!(
-                        "Erreur: Le motif cible 'target' n'a pas été trouvé dans '{}'. Assurez-vous que l'extrait correspond exactement.",
-                        path_str
-                    ),
-                    pending_diff: None,
-                };
-            }
-
-            let new_content = old_content.replacen(target, replacement, 1);
             let diff_lines = computed_diff(&old_content, &new_content);
 
             // Register the edited content for `verify_project`.
@@ -266,7 +414,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
             ToolResult {
                 content: format!(
-                    "OK: '{}' modifié (diff généré). Poursuis les étapes suivantes.",
+                    "OK: '{}' modifié (diff généré). Poursuis les étapes suivantes ou vérifie avec `verify_project`.",
                     path_str
                 ),
                 pending_diff: Some(pending_diff),
@@ -577,7 +725,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_definitions_valid() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 9);
+        assert_eq!(defs.len(), 10);
         let names: Vec<_> = defs
             .iter()
             .filter_map(|d| d.get("function")?.get("name")?.as_str())
@@ -591,6 +739,7 @@ mod tests {
         assert!(names.contains(&"run_command"));
         assert!(names.contains(&"verify_project"));
         assert!(names.contains(&"ask_spec_questions"));
+        assert!(names.contains(&"update_tasks"));
     }
 
     #[tokio::test]
@@ -762,5 +911,88 @@ mod tests {
         assert!(properties.get("files").is_some());
         assert!(properties.get("path").is_some());
         assert!(properties.get("content").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_tolerates_indentation_differences() {
+        let temp_path = std::env::temp_dir().join("test_edit_fuzzy.rs");
+        std::fs::write(
+            &temp_path,
+            "fn main() {\n    let x = 1;\n    let y = 2;\n    println!(\"{}\", y);\n}\n",
+        )
+        .unwrap();
+
+        // `target` has different indentation than the file on disk.
+        let res = execute_native_tool(
+            "edit_file",
+            json!({
+                "path": temp_path.to_str().unwrap(),
+                "target": "let x = 1;\nlet y = 2;",
+                "replacement": "    let x = 10;\n    let y = 20;"
+            }),
+        )
+        .await;
+
+        assert!(res.pending_diff.is_some(), "content: {}", res.content);
+        let diff = res.pending_diff.unwrap();
+        assert!(
+            diff.new_content.contains("let x = 10;"),
+            "{}",
+            diff.new_content
+        );
+        assert!(diff.new_content.contains("let y = 20;"));
+        // Adjacent lines must not have been consumed by the replacement.
+        assert!(diff.new_content.contains("fn main() {"));
+        assert!(diff.new_content.contains("println!"));
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_failure_shows_file_content() {
+        let temp_path = std::env::temp_dir().join("test_edit_fail.rs");
+        std::fs::write(&temp_path, "fn main() {\n    let answer = 42;\n}\n").unwrap();
+
+        let res = execute_native_tool(
+            "edit_file",
+            json!({
+                "path": temp_path.to_str().unwrap(),
+                "target": "THIS SNIPPET DOES NOT EXIST",
+                "replacement": "x"
+            }),
+        )
+        .await;
+
+        assert!(res.pending_diff.is_none());
+        assert!(res.content.contains("a échoué"), "{}", res.content);
+        // The current content is echoed so the model can copy a real target.
+        assert!(res.content.contains("let answer = 42;"), "{}", res.content);
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[tokio::test]
+    async fn test_read_file_reads_staged_content_and_range() {
+        let temp_path = std::env::temp_dir().join("test_read_staged.txt");
+        let _ = std::fs::remove_file(&temp_path);
+        let path_str = temp_path.to_str().unwrap();
+
+        // Stage a file that is not on disk yet (as a pending diff would be).
+        stage_file(path_str, "ligne1\nligne2\nligne3\n");
+
+        let res = execute_native_tool("read_file", json!({ "path": path_str })).await;
+        assert!(res.content.contains("ligne2"), "{}", res.content);
+        assert!(res.content.contains("pas encore écrit sur le disque"));
+
+        let ranged = execute_native_tool(
+            "read_file",
+            json!({ "path": path_str, "start_line": 2, "end_line": 3 }),
+        )
+        .await;
+        assert!(ranged.content.contains("ligne2"), "{}", ranged.content);
+        assert!(!ranged.content.contains("ligne1"), "{}", ranged.content);
+        assert!(
+            ranged.content.contains("lignes 2-3 sur 3"),
+            "{}",
+            ranged.content
+        );
     }
 }

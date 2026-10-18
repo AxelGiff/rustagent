@@ -65,6 +65,11 @@ pub fn staged_files() -> Vec<(String, String)> {
     crate::session::default_session().staged_files()
 }
 
+/// Content staged for `path` during the current turn (not yet written to disk).
+pub fn staged_content(path: &str) -> Option<String> {
+    crate::session::default_session().staged_content(path)
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -361,9 +366,63 @@ fn shell_quote(s: &str) -> String {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+/// Manifest files marking the root of a buildable project.
+const PROJECT_MANIFESTS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "tsconfig.json",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "requirements.txt",
+];
+
+/// Walk up from `base` until a directory containing a project manifest is found.
+///
+/// Without this, a modification confined to `src/...` would resolve to the `src`
+/// directory (its common parent) and no build command would ever be detected.
+/// Climbing only happens when `base` already exists on disk, so a brand-new
+/// project (whose directory may not exist yet) keeps the caller-provided root.
+fn climb_to_project_root(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return base.to_string();
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let start = PathBuf::from(trimmed);
+    let absolute = if start.is_absolute() {
+        start
+    } else {
+        cwd.join(&start)
+    };
+    if !absolute.is_dir() {
+        return base.to_string();
+    }
+
+    let mut cur: Option<&Path> = Some(absolute.as_path());
+    while let Some(dir) = cur {
+        if PROJECT_MANIFESTS.iter().any(|m| dir.join(m).exists()) {
+            return match dir.strip_prefix(&cwd) {
+                Ok(r) if r.as_os_str().is_empty() => ".".to_string(),
+                Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                Err(_) => dir.to_string_lossy().replace('\\', "/"),
+            };
+        }
+        cur = dir.parent();
+    }
+    base.to_string()
+}
+
 /// Infer the project root: an explicit `cwd` wins, otherwise the common parent
-/// directory of the staged files, otherwise the current directory.
+/// directory of the staged files, otherwise the current directory. The result is
+/// then climbed to the nearest enclosing project manifest.
 pub fn determine_project_root(cwd: Option<&str>, staged: &[(String, String)]) -> String {
+    climb_to_project_root(&project_root_candidate(cwd, staged))
+}
+
+/// First-pass project root, before climbing to the nearest enclosing manifest.
+fn project_root_candidate(cwd: Option<&str>, staged: &[(String, String)]) -> String {
     if let Some(c) = cwd {
         let n = normalize(c);
         let n = n.trim_end_matches('/');
@@ -504,6 +563,40 @@ mod tests {
             determine_project_root(Some("./mon/projet"), &staged),
             "mon/projet"
         );
+    }
+
+    #[test]
+    fn test_determine_project_root_climbs_to_manifest() {
+        // Editing only `src/*` must still verify the enclosing Cargo project,
+        // not the `src` sub-directory (which has no manifest).
+        let dir = std::env::temp_dir().join(format!("rv_climb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src/api")).unwrap();
+        std::fs::create_dir_all(dir.join("src/tools")).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"").unwrap();
+        std::fs::write(dir.join("src/api/a.rs"), "").unwrap();
+        std::fs::write(dir.join("src/tools/b.rs"), "").unwrap();
+
+        let staged = vec![
+            (
+                dir.join("src/api/a.rs")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                String::new(),
+            ),
+            (
+                dir.join("src/tools/b.rs")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                String::new(),
+            ),
+        ];
+        let root = determine_project_root(None, &staged);
+        assert!(
+            Path::new(&root).join("Cargo.toml").exists(),
+            "root should contain the manifest, got {root}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

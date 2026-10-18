@@ -19,13 +19,21 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "Lit le contenu textuel complet d'un fichier du projet.",
+                "description": "Lit le contenu d'un fichier du projet (y compris le contenu généré dans le tour en cours, pas encore écrit sur le disque). Utilise `start_line`/`end_line` pour cibler une plage. À appeler AVANT tout `edit_file` sur du code existant.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Chemin relatif ou absolu du fichier à lire (ex: 'src/main.rs', 'Cargo.toml')."
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Première ligne à lire (1-based, optionnel)."
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Dernière ligne à lire, incluse (optionnel)."
                         }
                     },
                     "required": ["path"]
@@ -68,7 +76,7 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "edit_file",
-                "description": "Remplace une section spécifique de texte existant dans un fichier par un nouveau texte. Génère un diff et requiert la validation de l'utilisateur.",
+                "description": "Modifie une section ciblée d'un fichier existant : remplace `target` par `replacement`. `target` doit être un extrait EXACT copié depuis `read_file` (plusieurs lignes si besoin). La comparaison tolère les différences d'indentation/espaces ; en cas d'échec, l'erreur renvoie le contenu du fichier pour corriger `target`. Génère un diff à valider. À privilégier sur `write_file` pour une modification ciblée.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -78,11 +86,15 @@ pub fn get_tool_definitions() -> Vec<Value> {
                         },
                         "target": {
                             "type": "string",
-                            "description": "Texte exact existant à remplacer."
+                            "description": "Extrait EXACT existant à remplacer (copié depuis `read_file`)."
                         },
                         "replacement": {
                             "type": "string",
                             "description": "Nouveau texte de remplacement."
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Remplacer toutes les occurrences de `target` (défaut : false = première occurrence uniquement)."
                         }
                     },
                     "required": ["path", "target", "replacement"]
@@ -215,6 +227,32 @@ pub fn get_tool_definitions() -> Vec<Value> {
                         }
                     },
                     "required": ["path", "content"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "update_tasks",
+                "description": "Met à jour le plan de tâches de la demande en cours. À appeler DÈS LE DÉBUT pour lister les étapes concrètes (exploration, chaque fichier à créer/modifier, vérification), puis après CHAQUE étape pour cocher son avancement. Tu DOIS continuer à travailler tant que toutes les tâches ne sont pas 'done'. Renvoie la liste COMPLÈTE (elle remplace la précédente).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "description": "Liste complète et ordonnée des tâches restantes et terminées.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string", "description": "Identifiant court et unique (ex: '1', 'edit-app', 'verify')." },
+                                    "title": { "type": "string", "description": "Action concrète et vérifiable (ex: 'Ajouter la route /export dans src/api.rs')." },
+                                    "status": { "type": "string", "enum": ["pending", "in_progress", "done"], "description": "État de la tâche." }
+                                },
+                                "required": ["id", "title", "status"]
+                            }
+                        }
+                    },
+                    "required": ["tasks"]
                 }
             }
         }),

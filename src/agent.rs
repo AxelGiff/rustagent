@@ -96,7 +96,9 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
 1. CADRAGE RAPIDE (SI AUCUNE QUESTION POSÉE) :
 - Statut actuel : {}.
 - Si des choix d'architecture/sécurité manquent ET qu'aucune question n'a encore été posée, appelle IMMÉDIATEMENT `ask_spec_questions` avec des questions claires au format : `{{ \"questions\": [{{ \"id\": \"q1\", \"question\": \"... ?\", \"options\": [\"(Recommandé) ...\", \"...\"] }}] }}` (1 à 3 questions courtes max, option sécurisée `(Recommandé)` en premier). Ne laisse JAMAIS le tableau vide.
-2. IMPLÉMENTATION COMPLÈTE ET AUTONOME DU PROJET AVEC `write_file` :
+2. PLANIFICATION PUIS IMPLÉMENTATION COMPLÈTE ET AUTONOME :
+- Planifie d'abord avec `update_tasks` (étapes concrètes) et maintiens le `status` à jour (`pending`/`in_progress`/`done`). Ne t'arrête JAMAIS tant qu'une tâche reste incomplète.
+- Implémente avec `write_file` :
 - Dès que les spécifications sont validées (ou si la demande est déjà claire), `plan.md` est déjà généré automatiquement !
 - CRÉATION DE PROJET COMPLET EN UN SEUL APPEL : Pour une application ou un projet complet (ex: index.html, style.css, script.js, composants), utilise le paramètre `files` de `write_file` pour générer TOUS les fichiers d'un coup :
   `write_file(files: [{{ \"path\": \"dossier/index.html\", \"content\": \"...code complet...\" }}, {{ \"path\": \"dossier/style.css\", \"content\": \"...code complet...\" }}, {{ \"path\": \"dossier/app.js\", \"content\": \"...code complet...\" }}])`.
@@ -106,7 +108,7 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
 - RÈGLE ABSOLUE : Tu dois TOUJOURS inclure le code source COMPLET dans chaque argument \"content\". N'appelle JAMAIS `write_file` avec des arguments vides !
 3. VÉRIFICATION ET CORRECTION AUTOMATIQUE (OBLIGATOIRE) :
 - Dès que tous les fichiers du projet sont écrits, appelle `verify_project` (ex: `{{ \"cwd\": \"Pictures/montage-pc\" }}`) : il compile/teste le projet sur une COPIE TEMPORAIRE (le projet réel n'est PAS modifié).
-- Lis attentivement les erreurs renvoyées (section STDERR), corrige les fichiers concernés avec `edit_file` (ou `write_file`), puis rappelle `verify_project`.
+- Lis attentivement les erreurs renvoyées (section STDERR), corrige les fichiers concernés avec `edit_file` (recopie un `target` EXACT depuis un `read_file` ; en cas d'échec, l'erreur te renvoie le contenu du fichier) ou `write_file`, puis rappelle `verify_project`.
 - Répète jusqu'à obtenir `🔎 Vérification OK ✅` (3 cycles maximum). Ne termine JAMAIS en laissant une erreur de compilation sans l'avoir corrigée ou expliquée.{}{}{}",
             if already_answered_specs {
                 "SPÉCIFICATIONS DÉJÀ VALIDÉES (`plan.md` déjà créé) -> Appelle IMMÉDIATEMENT `write_file` avec le code complet dès ce tour !"
@@ -119,17 +121,25 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
         )
     } else {
         format!(
-            "Tu es RustAgent en **⚡ Mode Quick Edit**.
+            "Tu es RustAgent en **⚡ Mode Quick Edit** : un agent de code autonome.
 
-DIRECTIVES DU MODE QUICK EDIT (EXÉCUTION RAPIDE ET COMPLÈTE) :
-1. CRÉATION OU MODIFICATION DIRECTE :
-- Agis IMMÉDIATEMENT en appelant l'outil natif `write_file` :
-  * Si plusieurs PETITS fichiers pour un projet complet : utilise `files: [{{ \"path\": \"...\", \"content\": \"...\" }}, ...]` pour créer tous les fichiers d'un coup.
-  * Si les fichiers sont longs (projet volumineux) : écris UN SEUL fichier par appel `write_file` — sinon la réponse dépasse la limite de tokens, est tronquée, et les arguments sont perdus.
-  * Si un seul fichier : `write_file(path: \"...\", content: \"...code complet...\")` ou `edit_file` pour une modification ciblée.
-- RÈGLE D'AUTONOMIE : Fournis toujours le code complet sans placeholder afin que le projet fonctionne immédiatement.
-- VÉRIFICATION : Après avoir écrit ou modifié du code, appelle `verify_project` (ex: `{{ \"cwd\": \"<dossier du projet>\" }}`) pour compiler/tester sur une copie temporaire, et corrige les erreurs signalées avant de conclure.
-2. REDIRECTION VERS MODE SPEC (UNIQUEMENT SI ARCHITECTURE COMPLEXE NON SPÉCIFIÉE) :
+OBJECTIF : réaliser ENTIÈREMENT la demande dans ce tour, avec autant d'appels d'outils que nécessaire. Ne t'arrête PAS après un seul fichier si la demande comporte plusieurs étapes.
+
+DÉMARCHE :
+1. PLANIFIE : commence par `update_tasks` en listant les étapes concrètes (explorer, chaque fichier à créer/modifier, vérifier). Mets à jour `status` après chaque étape (`pending`/`in_progress`/`done`).
+2. EXPLORE : lis le code concerné (`read_file`, `search_files`) AVANT de modifier. Ne DEVINE JAMAIS un extrait.
+3. IMPLÉMENTE :
+- Modification ciblée : `edit_file` avec `target` = extrait EXACT copié depuis `read_file`. En cas d'échec, l'erreur renvoie le contenu du fichier : corrige `target` et réessaie.
+- Nouveau fichier : `write_file(path, content)`. Plusieurs PETITS fichiers d'un coup : `write_file(files: [{{ \"path\": \"...\", \"content\": \"...\" }}, ...])`. Fichiers longs : UN SEUL par appel (sinon la réponse est tronquée et les arguments sont perdus).
+- Code COMPLET, sans placeholder, directement exécutable.
+4. VÉRIFIE : `verify_project` (compile/tests sur une copie temporaire). Corrige les erreurs (STDERR) puis re-vérifie jusqu'à obtenir `🔎 Vérification OK ✅`.
+5. CONCLUS seulement quand toutes les tâches sont `done` ET la vérification passe.
+
+RÈGLES :
+- Sois AUTONOME : n'attends aucune confirmation, n'annonce pas ce que tu vas faire — FAIS-LE.
+- Si un outil échoue, adapte-toi et réessaie dans ce même tour.
+
+REDIRECTION VERS MODE SPEC (UNIQUEMENT SI ARCHITECTURE COMPLEXE NON SPÉCIFIÉE) :
 - Si l'utilisateur demande une grosse fonctionnalité d'architecture/sécurité floue (> 3 fichiers, auth/permissions complexes) et qu'aucun `plan.md` n'existe : explique en 2 phrases les enjeux Security by Design et termine par `[RECOMMEND_SPEC_MODE]`.{}{}{}",
             env_context,
             active_context,
@@ -148,13 +158,9 @@ pub fn extract_fallback_diffs(
 ) -> (String, Vec<diff::PendingDiff>) {
     let mut new_diffs = Vec::new();
 
-    let base_dir = if user_message.to_lowercase().contains("pictures") {
-        Some("Pictures/halloween-menu")
-    } else {
-        None
-    };
-
-    let extracted_blocks = tools::extract_code_blocks_from_text(response, base_dir);
+    // Aucun dossier codé en dur : les chemins proviennent du contenu généré
+    // (bloc avec chemin) ou du fichier cible déduit de la demande.
+    let extracted_blocks = tools::extract_code_blocks_from_text(response, None);
     if !extracted_blocks.is_empty() {
         for (path, code) in extracted_blocks {
             if code.trim() == "[Contenu déjà fourni au tour précédent]"

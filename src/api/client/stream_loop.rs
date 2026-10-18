@@ -10,6 +10,79 @@ use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
 
+/// A single step of the agent's self-maintained plan.
+#[derive(Debug, Clone)]
+struct Task {
+    id: String,
+    title: String,
+    status: String,
+}
+
+/// Parse the `tasks` array of an `update_tasks` call.
+fn parse_tasks(args: &Value) -> Vec<Task> {
+    let Some(arr) = args.get("tasks").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let title = t
+                .get("title")
+                .or_else(|| t.get("task"))
+                .or_else(|| t.get("content"))
+                .or_else(|| t.get("description"))
+                .and_then(|v| v.as_str())?
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                return None;
+            }
+            let id = t
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| (i + 1).to_string());
+            let status_raw = t
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("pending")
+                .trim()
+                .to_lowercase();
+            let status = match status_raw.as_str() {
+                "done" | "completed" | "complete" | "terminé" | "termine" | "fait" => "done",
+                "in_progress" | "in-progress" | "doing" | "en cours" | "en_cours" | "current" => {
+                    "in_progress"
+                }
+                _ => "pending",
+            }
+            .to_string();
+            Some(Task { id, title, status })
+        })
+        .collect()
+}
+
+/// Render a task list (checkbox style) for display and for the model.
+fn render_tasks(tasks: &[Task]) -> String {
+    tasks
+        .iter()
+        .map(|t| {
+            let mark = match t.status.as_str() {
+                "done" => "[x]",
+                "in_progress" => "[~]",
+                _ => "[ ]",
+            };
+            format!("{} {}. {}", mark, t.id, t.title)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Tasks that are not yet complete.
+fn remaining_tasks(tasks: &[Task]) -> Vec<&Task> {
+    tasks.iter().filter(|t| t.status != "done").collect()
+}
+
 /// Boucle agentique multi-tours native supportant le streaming SSE, l'historique de conversation
 /// et la détection d'aperçus de diffs nécessitant validation utilisateur.
 /// Si `spec_mode` est vrai (Mode Spec), les outils `ask_spec_questions` et `write_plan` sont actifs.
@@ -63,9 +136,10 @@ where
         name: None,
     }];
 
-    // Inclure l'historique récent (jusqu'à 6 messages) pour maintenir le fil de discussion sans alourdir le prompt
-    let history_slice = if history.len() > 6 {
-        &history[history.len() - 6..]
+    // Inclure l'historique récent (jusqu'à 12 messages) pour maintenir le fil de
+    // discussion sans alourdir le prompt.
+    let history_slice = if history.len() > 12 {
+        &history[history.len() - 12..]
     } else {
         history
     };
@@ -83,7 +157,7 @@ where
         if !msg.content.trim().is_empty() {
             messages.push(ChatMessage {
                 role: role.to_string(),
-                content: Some(crate::tools::truncate_output(&msg.content, 25, 1200)),
+                content: Some(crate::tools::truncate_output(&msg.content, 60, 4000)),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -107,14 +181,25 @@ where
     let mut list_dir_calls: usize = 0;
     let mut created_files: Vec<String> = Vec::new();
     let mut active_project_dir: Option<String> = None;
-    let max_read_turns: usize = 1;
-    const MAX_TOTAL_READ_CALLS: usize = 2;
-    const MAX_AGENT_ITERATIONS: usize = 14;
+    let mut tasks: Vec<Task> = Vec::new();
+    let mut continuation_nudges: usize = 0;
 
-    for iteration in 0..MAX_AGENT_ITERATIONS {
-        // En dernière itération, forcer le modèle à synthétiser en texte en désactivant les outils
-        let is_last_iteration = iteration == MAX_AGENT_ITERATIONS - 1;
-        let allow_tools = has_tools && !is_last_iteration;
+    // When the user asks to modify/fix existing code, give the model room to
+    // actually read the code (and re-read after a failed edit). Project creation
+    // keeps a tighter budget that pushes it to write without over-exploring.
+    let editing = intent.modification_intent;
+    let max_read_turns: usize = if editing { 6 } else { 2 };
+    let max_read_calls_per_turn: usize = if editing { 6 } else { 3 };
+    let max_total_read_calls: usize = if editing { 16 } else { 4 };
+    // A feature may need many read/edit/verify cycles: keep a generous budget.
+    let max_agent_iterations: usize = if editing { 30 } else { 20 };
+
+    for iteration in 0..max_agent_iterations {
+        // La dernière itération sert uniquement à conclure proprement.
+        let is_last_iteration = iteration == max_agent_iterations - 1;
+        // Les outils restent disponibles le plus longtemps possible : un agent qui
+        // doit finir une fonctionnalité ne doit pas être amputé en plein travail.
+        let allow_tools = has_tools;
 
         // Dès que le budget de lecture (1 tour max) est atteint,
         // on retire TOUS les outils d'exploration (`read_file`, `list_directory`, `search_files`, `run_command`)
@@ -126,7 +211,7 @@ where
             total_read_calls,
             list_dir_calls,
             max_read_turns,
-            MAX_TOTAL_READ_CALLS,
+            max_total_read_calls,
         );
         let has_active_tools = active_tools
             .as_ref()
@@ -413,12 +498,13 @@ where
                 }
 
                 if is_explore_call
-                    && (read_calls_this_turn >= 2 || total_read_calls >= MAX_TOTAL_READ_CALLS)
+                    && (read_calls_this_turn >= max_read_calls_per_turn
+                        || total_read_calls >= max_total_read_calls)
                 {
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
                         content: Some(
-                            "⚠️ BUDGET D'EXPLORATION ATTEINT (2 lectures max) : N'appelle plus d'outils de lecture/recherche/commande. Passe IMMÉDIATEMENT à l'écriture (`write_plan` puis `write_file` / `edit_file`) dès maintenant !".to_string(),
+                            format!("⚠️ BUDGET D'EXPLORATION ATTEINT ({} lectures max) : N'appelle plus d'outils de lecture/recherche/commande. Passe MAINTENANT à l'écriture (`edit_file` pour une modification ciblée, `write_file` pour un nouveau fichier) ou à `verify_project`.", max_total_read_calls),
                         ),
                         tool_calls: None,
                         tool_call_id: Some(call.id.clone()),
@@ -429,6 +515,42 @@ where
 
                 tool_executions_count += 1;
                 let mut args = parse_lenient_tool_args(&call.function.arguments);
+
+                // `update_tasks` pilote la boucle (plan auto-maintenu de l'agent) :
+                // traité ici plutôt que par l'exécuteur d'outils générique.
+                if call.function.name == "update_tasks" {
+                    let parsed = parse_tasks(&args);
+                    let content = if parsed.is_empty() {
+                        "⚠️ 'tasks' est vide ou invalide : renvoie la liste COMPLÈTE des tâches, chacune avec 'id', 'title' et 'status' ('pending' | 'in_progress' | 'done').".to_string()
+                    } else {
+                        tasks = parsed;
+                        let remaining = remaining_tasks(&tasks).len();
+                        format!(
+                            "📋 Plan mis à jour — {} tâche(s), {} restante(s) :\n{}\n\n{}",
+                            tasks.len(),
+                            remaining,
+                            render_tasks(&tasks),
+                            if remaining == 0 {
+                                "Toutes les tâches sont terminées. Si ce n'est pas déjà fait, lance `verify_project`, corrige si besoin, puis conclus."
+                            } else {
+                                "Continue avec la prochaine tâche incomplète. N'arrête PAS tant que toutes les tâches ne sont pas 'done'."
+                            }
+                        )
+                    };
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(content),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                        name: Some(call.function.name.clone()),
+                    });
+                    if !tasks.is_empty() {
+                        let notice = format!("\n\n📋 `update_tasks`\n{}\n\n", render_tasks(&tasks));
+                        accumulated_content.push_str(&notice);
+                        on_chunk(&notice);
+                    }
+                    continue;
+                }
 
                 // Détection et mise à jour automatique du dossier de projet actif (ex: C:/Users/vadzt/Pictures/halloween-menu)
                 if call.function.name == "read_file" || call.function.name == "list_directory" {
@@ -712,7 +834,7 @@ where
                 if !has_mutation
                     && !failed
                     && (consecutive_read_turns + 1 >= max_read_turns
-                        || total_read_calls >= MAX_TOTAL_READ_CALLS)
+                        || total_read_calls >= max_total_read_calls)
                     && is_explore_call
                 {
                     if spec_mode && !intent.specs_already_answered {
@@ -735,33 +857,11 @@ where
                 });
             }
 
-            // Si la demande de l'utilisateur concernait un simple fichier unique et qu'il a été généré
-            if !created_files.is_empty() && policy::is_single_file_intent(&lower_prompt) {
-                let files_summary = format!(
-                    "\n\n✅ **Fichier prêt dans l'onglet Diff :**\n- `{}`\n\n*(Vous pouvez vérifier et valider la modification ci-contre.)*",
-                    created_files[0]
-                );
-                accumulated_content.push_str(&files_summary);
-                on_chunk(&files_summary);
-                return Ok(accumulated_content);
-            }
-
-            // Pour les projets complets, couper une fois 8+ fichiers préparés
-            if created_files.len() >= 8 {
-                let files_summary = format!(
-                    "\n\n✅ **Tous les fichiers du projet sont prêts dans l'onglet Diff ({} fichier(s)) :**\n{}",
-                    created_files.len(),
-                    created_files
-                        .iter()
-                        .map(|f| format!("- `{}`", f))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                );
-                accumulated_content.push_str(&files_summary);
-                on_chunk(&files_summary);
-                return Ok(accumulated_content);
-            }
-
+            // IMPORTANT : ne pas s'arrêter ici. On continue tant que le modèle
+            // appelle des outils ; la boucle ne se termine que sur une réponse
+            // finale (texte sans appel d'outil) ou à l'épuisement du budget.
+            // (L'ancien arrêt après 1 ou 8 fichiers empêchait de finir une
+            // fonctionnalité en un seul tour.)
             if any_read_succeeded {
                 consecutive_read_turns += 1;
             }
@@ -769,6 +869,46 @@ where
         }
 
         if !full_content.trim().is_empty() {
+            // Relance l'agent s'il veut conclure alors qu'il reste du travail :
+            // soit des tâches inachevées, soit aucune action encore effectuée
+            // (l'utilisateur a demandé du code mais le modèle s'est contenté de
+            // parler). Sans cela, l'agent « s'arrête » et il faut re-prompter.
+            let outstanding = remaining_tasks(&tasks);
+            let no_action = created_files.is_empty() && tool_executions_count == 0;
+            let wants_work = spec_mode || intent.modification_intent;
+            let should_continue = !is_last_iteration
+                && continuation_nudges < 4
+                && has_active_tools
+                && (!outstanding.is_empty() || (no_action && wants_work));
+
+            if should_continue {
+                continuation_nudges += 1;
+                messages.push(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: Some(full_content.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
+                let nudge = if !outstanding.is_empty() {
+                    format!(
+                        "⚠️ Tu ne peux pas conclure : {} tâche(s) encore incomplète(s).\n{}\n\nAppelle IMMÉDIATEMENT l'outil nécessaire (`read_file`/`edit_file`/`write_file`/`verify_project`) pour avancer, puis `update_tasks` pour mettre à jour le plan. Ne termine qu'une fois TOUTES les tâches 'done' ET `verify_project` OK.",
+                        outstanding.len(),
+                        render_tasks(&tasks)
+                    )
+                } else {
+                    "⚠️ Tu n'as encore rien modifié ni vérifié. N'explique pas : AGIS MAINTENANT. Commence par `update_tasks` (plan des étapes), puis `read_file` le code concerné et `edit_file`/`write_file`, et termine par `verify_project`.".to_string()
+                };
+                messages.push(ChatMessage {
+                    role: "user".to_string(),
+                    content: Some(nudge),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
+                continue;
+            }
+
             let mut final_text =
                 if !accumulated_content.trim().is_empty() && accumulated_content != full_content {
                     accumulated_content
@@ -843,5 +983,52 @@ where
         Ok(final_summary)
     } else {
         Err("Nombre maximum d'itérations atteint sans réponse finale du modèle.".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tasks_with_aliases_and_status_normalization() {
+        let args = json!({
+            "tasks": [
+                { "id": "1", "title": "Lire le fichier", "status": "done" },
+                { "id": "2", "task": "Modifier la fonction", "status": "in_progress" },
+                { "title": "Vérifier", "status": "pending" },
+                { "title": "   ", "status": "pending" }
+            ]
+        });
+        let tasks = parse_tasks(&args);
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].status, "done");
+        assert_eq!(tasks[1].status, "in_progress");
+        assert_eq!(tasks[1].title, "Modifier la fonction");
+        // Missing id falls back to the 1-based index; blank titles are dropped.
+        assert_eq!(tasks[2].title, "Vérifier");
+        assert!(!tasks[2].id.is_empty());
+    }
+
+    #[test]
+    fn renders_and_counts_remaining_tasks() {
+        let args = json!({
+            "tasks": [
+                { "id": "a", "title": "Étape A", "status": "done" },
+                { "id": "b", "title": "Étape B", "status": "pending" }
+            ]
+        });
+        let tasks = parse_tasks(&args);
+        let rendered = render_tasks(&tasks);
+        assert!(rendered.contains("[x] a. Étape A"), "{rendered}");
+        assert!(rendered.contains("[ ] b. Étape B"), "{rendered}");
+        assert_eq!(remaining_tasks(&tasks).len(), 1);
+        assert_eq!(remaining_tasks(&tasks)[0].id, "b");
+    }
+
+    #[test]
+    fn empty_or_invalid_tasks_yield_nothing() {
+        assert!(parse_tasks(&json!({})).is_empty());
+        assert!(parse_tasks(&json!({ "tasks": "nope" })).is_empty());
     }
 }

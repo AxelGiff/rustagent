@@ -20,6 +20,10 @@ pub struct TurnIntent {
     pub wants_terminal_cmd: bool,
     /// The user referred to an existing folder/project.
     pub mentions_existing_folder: bool,
+    /// The user asks to modify/fix/refactor/debug existing code (as opposed to
+    /// creating a new project). Exploration tools are kept available and the
+    /// read budget is widened so the model can actually see the code it edits.
+    pub modification_intent: bool,
 }
 
 /// Extract the function name from a tool definition JSON value.
@@ -46,7 +50,8 @@ pub fn analyze_intent(
             .any(|m| m.content.contains("SPEC_QUESTIONS_JSON:"));
     let project_preloaded = system_prompt.contains("[PROJET CIBLE PRÉ-CHARGÉ AUTOMATIQUEMENT");
     let wants_terminal_cmd = [
-        "terminal", "bash", "commande", "npm ", "cargo ", "pip ", "pytest",
+        "terminal", "bash", "commande", "npm ", "cargo ", "pip ", "pytest", "compile", "compil",
+        "build", "lance ", "lancer", "exécute", "execute", "run ", "tester", "test ", "tests",
     ]
     .iter()
     .any(|k| lower_prompt.contains(k));
@@ -56,11 +61,51 @@ pub fn analyze_intent(
         || lower_prompt.contains("dans mon projet")
         || lower_prompt.contains("dans le dossier");
 
+    // Verbs/keywords that signal an edit/repair/refactor request on existing code.
+    let modification_intent = [
+        "modifie",
+        "modifier",
+        "corrige",
+        "corriger",
+        "correction",
+        "répare",
+        "repare",
+        "fixe",
+        "fix ",
+        "bug",
+        "refactor",
+        "ajoute",
+        "ajouter",
+        "change",
+        "changer",
+        "met à jour",
+        "mets à jour",
+        "update",
+        "supprime",
+        "supprimer",
+        "renomme",
+        "renommer",
+        "debug",
+        "débogue",
+        "erreur",
+        "ne fonctionne pas",
+        "marche pas",
+        "améliore",
+        "améliorer",
+        "optimise",
+        "optimiser",
+        "remplace",
+        "remplacer",
+    ]
+    .iter()
+    .any(|k| lower_prompt.contains(k));
+
     TurnIntent {
         specs_already_answered,
         project_preloaded,
         wants_terminal_cmd,
         mentions_existing_folder,
+        modification_intent,
     }
 }
 
@@ -78,14 +123,18 @@ pub fn select_initial_tools(all: Vec<Value>, intent: &TurnIntent, spec_mode: boo
             if !intent.wants_terminal_cmd && name == "run_command" {
                 return false;
             }
-            if (intent.project_preloaded
-                || !intent.mentions_existing_folder
-                || intent.specs_already_answered)
+            if !intent.modification_intent
+                && (intent.project_preloaded
+                    || !intent.mentions_existing_folder
+                    || intent.specs_already_answered)
                 && (name == "list_directory" || name == "search_files")
             {
                 return false;
             }
-            if !intent.mentions_existing_folder && name == "read_file" {
+            if !intent.modification_intent
+                && !intent.mentions_existing_folder
+                && name == "read_file"
+            {
                 return false;
             }
             true
@@ -119,6 +168,7 @@ pub fn active_tools_for_iteration(
                             | "edit_file"
                             | "ask_spec_questions"
                             | "verify_project"
+                            | "update_tasks"
                     )
                 })
                 .cloned()
@@ -152,29 +202,6 @@ pub fn truncate_old_tool_outputs(messages: &mut [ChatMessage]) {
     }
 }
 
-/// Whether the user asked for a single, small file (as opposed to a whole project).
-pub fn is_single_file_intent(lower_prompt: &str) -> bool {
-    !lower_prompt.contains("projet")
-        && !lower_prompt.contains("plusieurs")
-        && !lower_prompt.contains("application")
-        && !lower_prompt.contains("composant")
-        && (lower_prompt.contains("un simple")
-            || lower_prompt.contains("un seul")
-            || lower_prompt.contains("un fichier")
-            || lower_prompt.contains("le fichier")
-            || lower_prompt.contains("index.html")
-            || lower_prompt.contains("page html")
-            || lower_prompt.contains("fichier html")
-            || lower_prompt.contains("simple html")
-            || lower_prompt.contains("script ")
-            || (!lower_prompt.contains(" et ")
-                && (lower_prompt.ends_with(".html")
-                    || lower_prompt.ends_with(".rs")
-                    || lower_prompt.ends_with(".py")
-                    || lower_prompt.ends_with(".js")
-                    || lower_prompt.ends_with(".css"))))
-}
-
 /// Turn the accumulated streaming tool-call fragments into clean [`ToolCall`]s.
 pub fn finalize_tool_calls(
     tool_calls: &BTreeMap<usize, (String, String, String)>,
@@ -205,4 +232,36 @@ pub fn finalize_tool_calls(
         });
     }
     calls_vec
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modification_intent_detected_for_edits() {
+        let prompt = "Corrige le bug dans le menu et modifie la couleur du bouton";
+        let lower = prompt.to_lowercase();
+        let intent = analyze_intent(&lower, prompt, "", &[]);
+        assert!(intent.modification_intent);
+    }
+
+    #[test]
+    fn creation_prompt_is_not_modification() {
+        let prompt = "Crée une application de recettes dans un nouveau dossier";
+        let lower = prompt.to_lowercase();
+        let intent = analyze_intent(&lower, prompt, "", &[]);
+        assert!(!intent.modification_intent);
+    }
+
+    #[test]
+    fn modification_intent_keeps_read_file_tool() {
+        let prompt = "corrige l'erreur";
+        let lower = prompt.to_lowercase();
+        let intent = analyze_intent(&lower, prompt, "", &[]);
+        let selected = select_initial_tools(crate::tools::get_tool_definitions(), &intent, false);
+        let names: Vec<&str> = selected.iter().map(tool_name).collect();
+        assert!(names.contains(&"read_file"), "names: {:?}", names);
+        assert!(names.contains(&"edit_file"), "names: {:?}", names);
+    }
 }

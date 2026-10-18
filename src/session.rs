@@ -210,6 +210,16 @@ impl AgentSession {
             .unwrap_or_default()
     }
 
+    /// Content staged for `path` during the current turn, if any.
+    ///
+    /// Lets tools that read or edit a file see the version generated earlier in
+    /// the same turn (which is not yet written to disk, since diffs await the
+    /// user's validation).
+    pub fn staged_content(&self, path: &str) -> Option<String> {
+        let key = path.trim().replace('\\', "/");
+        self.staging.lock().ok().and_then(|s| s.get(&key).cloned())
+    }
+
     // -- Verification workspaces -------------------------------------------
 
     /// Return the temp verification workspace for `project_root`, creating it

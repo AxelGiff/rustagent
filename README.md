@@ -37,7 +37,18 @@ les commandes shell sont soumises à **confirmation** avant exécution.
   directe.
 - 🧰 **Outils natifs (function calling)** — `read_file`, `write_file`,
   `write_plan`, `edit_file`, `list_directory`, `search_files`, `run_command`,
-  `ask_spec_questions`, `verify_project`.
+  `ask_spec_questions`, `verify_project`, `update_tasks`.
+- 🧭 **Agent multi-étapes autonome** — pour une fonctionnalité, l'agent établit son
+  **plan de tâches** (`update_tasks`), l'exécute étape par étape (explorer →
+  modifier → vérifier) et **ne s'arrête pas** tant qu'il reste des tâches
+  inachevées. S'il tente de conclure sans avoir agi, il est **relancé
+  automatiquement** au lieu de vous rendre la main.
+- ✏️ **Modification de code existant** — pour éditer du code, l'agent commence par
+  **lire** les fichiers concernés, puis utilise `edit_file` avec un extrait exact.
+  La comparaison **tolère les différences d'indentation**, et en cas d'échec le
+  contenu réel du fichier est renvoyé à l'agent pour qu'il corrige et réessaie
+  **dans le même tour** (fini les allers-retours). Les lectures voient aussi les
+  modifications en attente du tour en cours.
 - 📝 **Revue de diffs** — toute création/modification de fichier produit un diff
   en attente ; rien n'est écrit tant que vous n'avez pas accepté.
 - 🔎 **Vérification automatique** — l'agent peut compiler et **tester** son propre
@@ -250,7 +261,7 @@ compilés sont écrits dans le répertoire temporaire de la plateforme.
 
 ## Tests et intégration continue
 
-- **Tests unitaires** : `cargo test` (actuellement **121 tests** couvrant la
+- **Tests unitaires** : `cargo test` (actuellement **131 tests** couvrant la
   détection de langage, l'extraction de code, la construction des commandes
   d'exécution, les diffs, le filtrage du raisonnement, l'approbation des
   commandes, etc.).
