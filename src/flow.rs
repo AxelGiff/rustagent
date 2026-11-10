@@ -13,6 +13,9 @@
 
 use crate::SupportedLanguage;
 
+/// Initial demo code loaded into the editor on startup.
+pub const INITIAL_SNIPPET: &str = "def fibonacci(n):\n    \"\"\"Return the first n Fibonacci numbers.\"\"\"\n    if n <= 0:\n        return []\n    if n == 1:\n        return [0]\n    fib = [0, 1]\n    for i in range(2, n):\n        fib.append(fib[i - 1] + fib[i - 2])\n    return fib\n\nif __name__ == \"__main__\":\n    result = fibonacci(10)\n    print(\"First 10 Fibonacci numbers:\", result)\n";
+
 /// Keywords that indicate the user wants code generated. This is intentionally
 /// broad: it triggers on write/generate/create/make/code/implement/program/
 /// script/function/class.

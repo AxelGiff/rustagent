@@ -1,4 +1,4 @@
-//! DTOs and JSON serialization models for OpenAI and Albert completions.
+//! DTOs and JSON serialization models for Albert API completions.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

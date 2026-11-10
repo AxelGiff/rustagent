@@ -1,6 +1,7 @@
 //! Top application toolbar: title, theme preset selector, settings trigger, chat/terminal reset buttons.
 
 use crate::api;
+use crate::config;
 use crate::theme::ThemePreset;
 use freya::prelude::*;
 
@@ -71,16 +72,17 @@ pub fn app_toolbar(
                 .border_fill(Color::TRANSPARENT)
                 .color(c.text_secondary)
                 .on_press({
-                    let ep_val = settings_endpoint_input.read().clone();
-                    let key_val = settings_key_input.read().clone();
                     let available_models = available_models;
                     let models_loading = models_loading;
                     let mut show_settings = show_settings;
                     move |_| {
                         *show_settings.write() = true;
                         if available_models.read().is_empty() {
-                            let ep = ep_val.trim().to_string();
-                            let k = key_val.trim().to_string();
+                            let cfg = config::ApiKeyConfig::load();
+                            let ep = cfg
+                                .endpoint
+                                .unwrap_or_else(|| crate::agent::ALBERT_ENDPOINT.to_string());
+                            let k = cfg.key;
                             let mut am = available_models.clone();
                             let mut ml = models_loading.clone();
                             *ml.write() = true;

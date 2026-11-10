@@ -54,12 +54,12 @@ fn app() -> impl IntoElement {
     let messages = use_state(|| {
         let mut initial = vec![Message {
             role: Role::AI,
-            content: "Hello! I'm your coding assistant. Ask me to write code in any language (Python, JavaScript, TypeScript, HTML, CSS, C, C++, Java, Go, Rust) and I'll put it in the editor for you. You can then run it with the **Execute Code** button. Type **clear editor** to empty the code editor.".to_string(),
+            content: "👋 Bonjour ! Je suis **RustAgent**, votre assistant de développement propulsé par **Albert API**.\n\nDécrivez une tâche en **⚡ Quick Edit** ou en **🛡️ Mode Spec (Security by Design)** : chaque modification générera une revue de diff interactive que vous pourrez inspecter et valider.".to_string(),
         }];
         if let Some(warning) = startup_key_warning {
             initial.push(Message {
                 role: Role::AI,
-                content: format!("⚠️ {}\n\nYou can set your API key via the **Settings** button in the toolbar, the `{}` environment variable, or the config file at `{}`.", warning, config::API_KEY_ENV, config::ApiKeyConfig::config_file_path().display()),
+                content: format!("⚠️ {}\n\nVous pouvez configurer votre clé API via le bouton **Settings** de la barre d'outils, la variable d'environnement `{}`, ou le fichier `{}`.", warning, config::API_KEY_ENV, config::ApiKeyConfig::config_file_path().display()),
             });
         }
         initial
@@ -70,6 +70,13 @@ fn app() -> impl IntoElement {
     let current_dir = use_state(|| std::env::current_dir().unwrap_or_default());
     let expanded_dirs = use_state(std::collections::HashSet::<std::path::PathBuf>::new);
     let pending_diffs = use_state(Vec::<diff::PendingDiff>::new);
+    let selected_diff_idx = use_state(|| 0usize);
+    let inline_diff_idx = use_state(|| None::<usize>);
+    let review_box_expanded = use_state(|| false);
+    let chat_scroll = use_scroll_controller(|| ScrollConfig {
+        default_vertical_position: ScrollPosition::End,
+        ..Default::default()
+    });
     let center_view_mode = use_state(|| CenterViewMode::Editor);
     let is_generating = use_state(|| false);
     let is_spec_mode = use_state(|| false);
@@ -93,15 +100,17 @@ fn app() -> impl IntoElement {
 
     let show_settings = use_state(|| false);
     let saved_cfg = config::ApiKeyConfig::load();
-    let settings_key_input = use_state(|| saved_cfg.key);
+    let settings_key_input = use_state(|| saved_cfg.key.clone());
     let settings_model_input = use_state(|| {
         saved_cfg
             .model
+            .clone()
             .unwrap_or_else(|| agent::ALBERT_MODEL.to_string())
     });
     let settings_endpoint_input = use_state(|| {
         saved_cfg
             .endpoint
+            .clone()
             .unwrap_or_else(|| agent::ALBERT_ENDPOINT.to_string())
     });
     let available_models = use_state(Vec::<String>::new);
@@ -112,8 +121,11 @@ fn app() -> impl IntoElement {
     let mut initial_models_loaded = use_state(|| false);
     if !*initial_models_loaded.read() {
         *initial_models_loaded.write() = true;
-        let ep = settings_endpoint_input.read().trim().to_string();
-        let k = settings_key_input.read().trim().to_string();
+        let ep = saved_cfg
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| agent::ALBERT_ENDPOINT.to_string());
+        let k = saved_cfg.key.clone();
         let mut available_models = available_models;
         let mut models_loading = models_loading;
         spawn(async move {
@@ -129,38 +141,24 @@ fn app() -> impl IntoElement {
         });
     }
 
-    let current_language = use_state(|| SupportedLanguage::Python);
+    let current_language = use_state(|| SupportedLanguage::Rust);
 
-    let editor = use_state(|| {
-        let code = r#"def fibonacci(n):
-    """Return the first n Fibonacci numbers."""
-    if n <= 0:
-        return []
-    if n == 1:
-        return [0]
-    
-    fib = [0, 1]
-    for i in range(2, n):
-        fib.append(fib[i - 1] + fib[i - 2])
-    return fib
+    let editor = use_state(|| create_editor_data("", None));
 
-if __name__ == "__main__":
-    result = fibonacci(10)
-    print("First 10 Fibonacci numbers:", result)
-"#;
-        create_editor_data(code, Some(SupportedLanguage::Python))
-    });
-
-    let file_name = use_state(|| {
-        flow::derive_file_name(&editor.read().rope.to_string(), *current_language.read())
-    });
+    let file_name = use_state(String::new);
 
     let clear_chat = {
         let mut messages = messages;
+        let mut pending_diffs = pending_diffs;
+        let mut selected_diff_idx = selected_diff_idx;
+        let mut inline_diff_idx = inline_diff_idx;
         let mut spec_selected_options = spec_selected_options;
         let mut spec_custom_input = spec_custom_input;
         move || {
             messages.write().clear();
+            pending_diffs.write().clear();
+            *selected_diff_idx.write() = 0;
+            *inline_diff_idx.write() = None;
             spec_selected_options.write().clear();
             *spec_custom_input.write() = String::new();
             messages.write().push(Message {
@@ -210,28 +208,19 @@ if __name__ == "__main__":
             let model = settings_model_input.read().trim().to_string();
             let endpoint = settings_endpoint_input.read().trim().to_string();
             let cfg = config::ApiKeyConfig {
-                key: key.clone(),
+                key,
                 model: if model.is_empty() { None } else { Some(model) },
-                endpoint: if endpoint.is_empty() {
-                    None
-                } else {
-                    Some(endpoint)
-                },
+                endpoint: if endpoint.is_empty() { None } else { Some(endpoint) },
                 source: config::KeySource::ConfigFile,
             };
-            match cfg.validate() {
-                Ok(()) => match cfg.save() {
-                    Ok(()) => {
-                        *settings_feedback.write() = "Paramètres enregistrés.".to_string();
-                        *show_settings.write() = false;
-                    }
-                    Err(e) => {
-                        *settings_feedback.write() = format!("Save failed: {}", e);
-                    }
-                },
-                Err(e) => {
-                    *settings_feedback.write() = e;
-                }
+            let val_res = cfg.validate();
+            if let Err(e) = cfg.save() {
+                *settings_feedback.write() = format!("Échec d'enregistrement: {}", e);
+            } else if let Err(warn) = val_res {
+                *settings_feedback.write() = format!("Enregistré avec avertissement: {}", warn);
+            } else {
+                *settings_feedback.write() = "Paramètres enregistrés avec succès.".to_string();
+                *show_settings.write() = false;
             }
         }
     };
@@ -243,140 +232,17 @@ if __name__ == "__main__":
         }
     };
 
-    let accept_diff = {
-        let mut pending_diffs = pending_diffs;
-        let mut messages = messages;
-        let mut center_view_mode = center_view_mode;
-        move |idx: usize| {
-            let diff_opt = {
-                let mut diffs = pending_diffs.write();
-                if idx < diffs.len() {
-                    Some(diffs.remove(idx))
-                } else if !diffs.is_empty() {
-                    Some(diffs.remove(0))
-                } else {
-                    None
-                }
-            };
-            if let Some(diff) = diff_opt {
-                if let Err(e) = diff::apply_diff_to_disk(&diff) {
-                    messages.write().push(Message {
-                        role: Role::AI,
-                        content: e,
-                    });
-                    return;
-                }
-                update_editor_if_matching(
-                    &diff.path,
-                    &diff.new_content,
-                    &file_name.read(),
-                    editor,
-                    current_language,
-                );
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: format!("✅ Modifications validées et appliquées à `{}`.", diff.path),
-                });
-            }
-            if pending_diffs.read().is_empty() {
-                *center_view_mode.write() = CenterViewMode::Editor;
-            }
-        }
-    };
-
-    let accept_all_diffs = {
-        let mut pending_diffs = pending_diffs;
-        let mut messages = messages;
-        let mut center_view_mode = center_view_mode;
-        move || {
-            let diffs = pending_diffs.write().drain(..).collect::<Vec<_>>();
-            let mut count = 0;
-            for diff in &diffs {
-                if let Err(e) = diff::apply_diff_to_disk(diff) {
-                    messages.write().push(Message {
-                        role: Role::AI,
-                        content: e,
-                    });
-                    continue;
-                }
-                count += 1;
-                update_editor_if_matching(
-                    &diff.path,
-                    &diff.new_content,
-                    &file_name.read(),
-                    editor,
-                    current_language,
-                );
-            }
-            if count > 0 {
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: format!(
-                        "✅ {} modification(s) validée(s) et appliquées sur le disque.",
-                        count
-                    ),
-                });
-            }
-            *center_view_mode.write() = CenterViewMode::Editor;
-        }
-    };
-
-    let reject_diff = {
-        let mut pending_diffs = pending_diffs;
-        let mut messages = messages;
-        let mut center_view_mode = center_view_mode;
-        move |idx: usize| {
-            let diff_opt = {
-                let mut diffs = pending_diffs.write();
-                if idx < diffs.len() {
-                    Some(diffs.remove(idx))
-                } else if !diffs.is_empty() {
-                    Some(diffs.remove(0))
-                } else {
-                    None
-                }
-            };
-            if let Some(diff) = diff_opt {
-                update_editor_if_matching(
-                    &diff.path,
-                    &diff.old_content,
-                    &file_name.read(),
-                    editor,
-                    current_language,
-                );
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: format!("❌ Modification pour `{}` rejetée.", diff.path),
-                });
-            }
-            if pending_diffs.read().is_empty() {
-                *center_view_mode.write() = CenterViewMode::Editor;
-            }
-        }
-    };
-
-    let reject_all_diffs = {
-        let mut pending_diffs = pending_diffs;
-        let mut messages = messages;
-        let mut center_view_mode = center_view_mode;
-        move || {
-            let diffs = pending_diffs.write().drain(..).collect::<Vec<_>>();
-            for diff in &diffs {
-                update_editor_if_matching(
-                    &diff.path,
-                    &diff.old_content,
-                    &file_name.read(),
-                    editor,
-                    current_language,
-                );
-            }
-            let count = diffs.len();
-            messages.write().push(Message {
-                role: Role::AI,
-                content: format!("❌ {} modification(s) en attente annulée(s).", count),
-            });
-            *center_view_mode.write() = CenterViewMode::Editor;
-        }
+    let diff_review = DiffReviewState {
+        pending_diffs,
+        selected_diff_idx,
+        inline_diff_idx,
+        review_box_expanded,
+        chat_scroll,
+        center_view_mode,
+        messages,
+        editor,
+        current_language,
+        file_name,
     };
 
     let open_file = {
@@ -404,6 +270,7 @@ if __name__ == "__main__":
         let mut editor = editor;
         let mut file_name = file_name;
         let mut is_generating = is_generating;
+        let mut chat_scroll = chat_scroll;
         move |user_message: String| {
             if !should_send_message(&user_message) {
                 return;
@@ -413,6 +280,7 @@ if __name__ == "__main__":
                 role: Role::User,
                 content: user_message.clone(),
             });
+            chat_scroll.scroll_to(ScrollPosition::End, Direction::Vertical);
 
             let detected_language = SupportedLanguage::detect(&user_message);
             let wants_clear_editor = flow::wants_clear_editor(&user_message);
@@ -421,12 +289,13 @@ if __name__ == "__main__":
             *input_value.write() = String::new();
 
             if wants_clear_editor {
-                *editor.write() = create_editor_data("\n", Some(*current_language.read()));
-                *file_name.write() = flow::derive_file_name("\n", *current_language.read());
+                *editor.write() = create_editor_data("", None);
+                *file_name.write() = String::new();
                 messages.write().push(Message {
                     role: Role::AI,
-                    content: "The code editor has been cleared.".to_string(),
+                    content: "L'éditeur a été vidé.".to_string(),
                 });
+                chat_scroll.scroll_to(ScrollPosition::End, Direction::Vertical);
                 return;
             }
 
@@ -440,6 +309,7 @@ if __name__ == "__main__":
             let mut center_view_mode_stream = center_view_mode;
             let mut messages_stream = messages;
             let mut is_generating_stream = is_generating;
+            let mut chat_scroll_stream = chat_scroll;
             let spec_mode = *is_spec_mode.read();
 
             spawn(async move {
@@ -447,11 +317,14 @@ if __name__ == "__main__":
                     role: Role::AI,
                     content: String::new(),
                 });
+                chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
                 let ai_msg_idx = messages_stream.read().len() - 1;
 
                 let mut messages_for_chunk = messages_stream;
                 let mut pending_diffs_for_cb = pending_diffs_stream;
                 let mut center_view_for_cb = center_view_mode_stream;
+                let mut chat_scroll_for_chunk = chat_scroll_stream;
+                let mut chat_scroll_for_cb = chat_scroll_stream;
 
                 // Snapshot AVANT l'appel asynchrone : sinon le guard de lecture de
                 // `pending_diffs_stream` reste vivant pendant tout le `.await` et le
@@ -471,10 +344,12 @@ if __name__ == "__main__":
                         if let Some(msg) = messages_for_chunk.write().get_mut(ai_msg_idx) {
                             msg.content.push_str(chunk);
                         }
+                        chat_scroll_for_chunk.scroll_to(ScrollPosition::End, Direction::Vertical);
                     },
                     |diff| {
-                        pending_diffs_for_cb.write().push(diff);
+                        diff::upsert_diff(&mut pending_diffs_for_cb.write(), diff);
                         *center_view_for_cb.write() = CenterViewMode::Diff;
+                        chat_scroll_for_cb.scroll_to(ScrollPosition::End, Direction::Vertical);
                     },
                 )
                 .await;
@@ -484,7 +359,9 @@ if __name__ == "__main__":
                 match result {
                     Ok((final_response, new_diffs)) => {
                         if !new_diffs.is_empty() {
-                            pending_diffs_stream.write().extend(new_diffs);
+                            for d in new_diffs {
+                                diff::upsert_diff(&mut pending_diffs_stream.write(), d);
+                            }
                             *center_view_mode_stream.write() = CenterViewMode::Diff;
                         }
                         if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
@@ -505,6 +382,7 @@ if __name__ == "__main__":
                         }
                     }
                 }
+                chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
             });
         }
     };
@@ -573,35 +451,29 @@ if __name__ == "__main__":
 
     let current_file_display = {
         let f = file_name.read().clone();
-        std::path::Path::new(&f)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or(f)
+        if f.trim().is_empty() {
+            "Aucun fichier ouvert".to_string()
+        } else {
+            std::path::Path::new(&f)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or(f)
+        }
     };
 
     let is_diff_view =
         *center_view_mode.read() == CenterViewMode::Diff && !pending_diffs.read().is_empty();
     let center_top_panel = if is_diff_view {
-        diff_viewer_panel(
-            pending_diffs.into(),
-            accept_diff,
-            accept_all_diffs,
-            reject_diff,
-            reject_all_diffs,
-            {
-                let mut center_view_mode = center_view_mode;
-                move || {
-                    *center_view_mode.write() = CenterViewMode::Editor;
-                }
-            },
-            c.clone(),
-        )
-        .into_element()
+        diff_viewer_panel(diff_review, c.clone()).into_element()
     } else {
         code_editor_panel(
             editor.into(),
             file_name.read().clone(),
-            pending_diffs.read().len(),
+            pending_diffs
+                .read()
+                .iter()
+                .filter(|d| d.status != diff::DiffStatus::Rejected)
+                .count(),
             {
                 let mut center_view_mode = center_view_mode;
                 move || {
@@ -630,6 +502,7 @@ if __name__ == "__main__":
         models_loading.into_writable(),
         project_name,
         current_file_display,
+        diff_review,
         send_text,
         c.clone(),
     );

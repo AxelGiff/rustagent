@@ -123,20 +123,8 @@ pub fn select_initial_tools(all: Vec<Value>, intent: &TurnIntent, spec_mode: boo
             if !intent.wants_terminal_cmd && name == "run_command" {
                 return false;
             }
-            if !intent.modification_intent
-                && (intent.project_preloaded
-                    || !intent.mentions_existing_folder
-                    || intent.specs_already_answered)
-                && (name == "list_directory" || name == "search_files")
-            {
-                return false;
-            }
-            if !intent.modification_intent
-                && !intent.mentions_existing_folder
-                && name == "read_file"
-            {
-                return false;
-            }
+            // Les outils d'exploration (list_directory, search_files, read_file)
+            // restent toujours activés pour permettre au modèle d'inspecter l'arborescence.
             true
         })
         .collect()
@@ -149,7 +137,7 @@ pub fn active_tools_for_iteration(
     allow_tools: bool,
     consecutive_read_turns: usize,
     total_read_calls: usize,
-    list_dir_calls: usize,
+    _list_dir_calls: usize,
     max_read_turns: usize,
     max_total_read_calls: usize,
 ) -> Option<Vec<Value>> {
@@ -171,14 +159,6 @@ pub fn active_tools_for_iteration(
                             | "update_tasks"
                     )
                 })
-                .cloned()
-                .collect(),
-        )
-    } else if list_dir_calls >= 1 {
-        Some(
-            tools_payload
-                .iter()
-                .filter(|t| tool_name(t) != "list_directory")
                 .cloned()
                 .collect(),
         )

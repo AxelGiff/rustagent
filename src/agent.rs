@@ -183,6 +183,7 @@ pub fn extract_fallback_diffs(
                 old_content: old,
                 new_content: code,
                 diff_lines,
+                status: diff::DiffStatus::Pending,
             });
         }
         (response.to_string(), new_diffs)
@@ -210,6 +211,7 @@ pub fn extract_fallback_diffs(
                     old_content: old_code,
                     new_content: code,
                     diff_lines,
+                    status: diff::DiffStatus::Pending,
                 });
                 (flow::insertion_confirmation(language), new_diffs)
             }
@@ -233,22 +235,22 @@ pub async fn run_agent_turn(
     on_tool_diff: impl FnMut(diff::PendingDiff),
 ) -> Result<(String, Vec<diff::PendingDiff>), String> {
     let api_key_config = config::ApiKeyConfig::load();
+    let model = api_key_config
+        .model
+        .clone()
+        .unwrap_or_else(|| ALBERT_MODEL.to_string());
+
     if let Err(msg) = api_key_config.validate() {
         return Err(format!(
-            "⚠️ {}\n\nPlease configure your API key and try again.",
+            "⚠️ {}\n\nVeuillez configurer votre clé dans les Réglages (⚙) et réessayer.",
             msg
         ));
     }
 
     let endpoint = api_key_config
         .endpoint
-        .clone()
         .unwrap_or_else(|| ALBERT_ENDPOINT.to_string());
-    let model = api_key_config
-        .model
-        .clone()
-        .unwrap_or_else(|| ALBERT_MODEL.to_string());
-    let api_key = api_key_config.key.clone();
+    let api_key = api_key_config.key;
 
     println!(
         "[DEBUG] Prompt envoyé (spec_mode={}) : {}",

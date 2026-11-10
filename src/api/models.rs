@@ -1,9 +1,9 @@
-//! Model discovery and fetching from OpenAI-compatible endpoints.
+//! Model discovery and fetching from the Albert API endpoint.
 
 use serde_json::Value;
 use std::time::Duration;
 
-/// Fetch the list of available model IDs from the OpenAI-compatible `/models` endpoint.
+/// Fetch the list of available model IDs from the Albert `/models` endpoint.
 pub async fn fetch_models(endpoint: &str, api_key: &str) -> Result<Vec<String>, String> {
     let base = endpoint.trim_end_matches('/');
     let url = format!("{}/models", base);
@@ -47,5 +47,6 @@ pub async fn fetch_models(endpoint: &str, api_key: &str) -> Result<Vec<String>, 
     }
 
     models.sort();
+    models.dedup();
     Ok(models)
 }

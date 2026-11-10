@@ -3,6 +3,7 @@
 use crate::api;
 use crate::config;
 use crate::types::{Message, Role, extract_spec_payload};
+use crate::views::diff_viewer::{DiffReviewState, changed_files_review_box};
 use freya::prelude::*;
 use std::collections::HashMap;
 
@@ -16,12 +17,13 @@ pub fn chat_panel(
     spec_selected_options: Writable<HashMap<String, String>>,
     spec_custom_input: Writable<String>,
     settings_model_input: Writable<String>,
-    settings_endpoint_input: Readable<String>,
-    settings_key_input: Readable<String>,
+    _settings_endpoint_input: Readable<String>,
+    _settings_key_input: Readable<String>,
     available_models: Writable<Vec<String>>,
     models_loading: Writable<bool>,
     project_name: String,
     current_file_display: String,
+    diff_review: DiffReviewState,
     on_send: impl FnMut(String) + Clone + 'static,
     c: ColorsSheet,
 ) -> impl IntoElement {
@@ -42,8 +44,9 @@ pub fn chat_panel(
 
     // Chat scrollable area
     let chat_area = rect().width(Size::fill()).height(Size::flex(1.)).child(
-        ScrollView::new().child(rect().width(Size::fill()).padding(16.).children(
-            messages.read().iter().map(|msg| {
+        ScrollView::new_controlled(diff_review.chat_scroll).child(
+            rect().width(Size::fill()).padding(16.).children(
+                messages.read().iter().map(|msg| {
                 let is_user = msg.role == Role::User;
                 let bg_color = if is_user {
                     c.surface_inverse
@@ -324,6 +327,11 @@ pub fn chat_panel(
                     .cross_align(align)
                     .child(bubble)
             }),
+        ).child(
+            rect()
+                .width(Size::fill())
+                .margin(8.)
+                .child(changed_files_review_box(diff_review, c.clone())),
         )),
     );
 
@@ -334,13 +342,10 @@ pub fn chat_panel(
     let mut model_options: Vec<String> = if !loaded_models.is_empty() {
         loaded_models
     } else {
-        vec![
-            "deepseek-v4-flash".to_string(),
-            "deepseek-v3".to_string(),
-            "openweight-medium".to_string(),
-            "albert-light".to_string(),
-            "qwen-2.5-coder".to_string(),
-        ]
+        config::ALBERT_MODELS
+            .iter()
+            .map(|&s| s.to_string())
+            .collect()
     };
     if !active_model.is_empty() && !model_options.contains(&active_model) {
         model_options.insert(0, active_model.clone());
@@ -361,7 +366,7 @@ pub fn chat_panel(
                     cfg.model = Some(m_choice.clone());
                     let _ = cfg.save();
                 })
-                .child(m)
+                .child(format!("🤖 {}", m))
         }
     });
 
@@ -382,13 +387,14 @@ pub fn chat_panel(
         .border_fill(Color::TRANSPARENT)
         .color(c.text_secondary)
         .on_press({
-            let ep_val = settings_endpoint_input.read().clone();
-            let key_val = settings_key_input.read().clone();
             let available_models = available_models;
             let models_loading = models_loading;
             move |_| {
-                let ep = ep_val.trim().to_string();
-                let k = key_val.trim().to_string();
+                let cfg = config::ApiKeyConfig::load();
+                let ep = cfg
+                    .endpoint
+                    .unwrap_or_else(|| crate::agent::ALBERT_ENDPOINT.to_string());
+                let k = cfg.key;
                 let mut am = available_models.clone();
                 let mut ml = models_loading.clone();
                 *ml.write() = true;
