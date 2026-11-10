@@ -103,10 +103,11 @@ where
     D: FnMut(crate::diff::PendingDiff),
 {
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
+        .connect_timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Erreur client HTTP: {}", e))?;
-    let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+    let base = endpoint.trim_end_matches('/');
+    let url = format!("{}/chat/completions", base);
 
     let lower_prompt = user_prompt.to_lowercase();
     let intent = policy::analyze_intent(&lower_prompt, user_prompt, system_prompt, history);
@@ -184,15 +185,14 @@ where
     let mut tasks: Vec<Task> = Vec::new();
     let mut continuation_nudges: usize = 0;
 
-    // When the user asks to modify/fix existing code, give the model room to
-    // actually read the code (and re-read after a failed edit). Project creation
-    // keeps a tighter budget that pushes it to write without over-exploring.
+    // Leave plenty of room for the agent to list directories, search files, and read
+    // existing code whether modifying or adding new components (e.g. creating a controller).
     let editing = intent.modification_intent;
-    let max_read_turns: usize = if editing { 6 } else { 2 };
-    let max_read_calls_per_turn: usize = if editing { 6 } else { 3 };
-    let max_total_read_calls: usize = if editing { 16 } else { 4 };
+    let max_read_turns: usize = if editing { 10 } else { 6 };
+    let max_read_calls_per_turn: usize = if editing { 10 } else { 6 };
+    let max_total_read_calls: usize = if editing { 25 } else { 15 };
     // A feature may need many read/edit/verify cycles: keep a generous budget.
-    let max_agent_iterations: usize = if editing { 30 } else { 20 };
+    let max_agent_iterations: usize = if editing { 30 } else { 25 };
 
     for iteration in 0..max_agent_iterations {
         // La dernière itération sert uniquement à conclure proprement.
@@ -237,23 +237,34 @@ where
             None
         };
 
-        let req = json!({
-            "model": model,
-            "messages": messages,
-            "tools": tools_to_send,
-            "tool_choice": send_tool_choice,
-            "stream": true,
-            "max_tokens": max_tokens
-        });
+        let mut req_map = serde_json::Map::new();
+        req_map.insert("model".to_string(), json!(model));
+        req_map.insert("messages".to_string(), json!(messages));
+        req_map.insert("stream".to_string(), json!(true));
+        req_map.insert("max_tokens".to_string(), json!(max_tokens));
 
-        // L'envoi de la requête est protégé par un timeout de 25s pour ne jamais bloquer indéfiniment.
+        if let Some(ref tools) = tools_to_send {
+            req_map.insert("tools".to_string(), json!(tools));
+            if let Some(ref tc) = send_tool_choice {
+                req_map.insert("tool_choice".to_string(), json!(tc));
+            } else {
+                req_map.insert("tool_choice".to_string(), json!("auto"));
+            }
+        }
+        let req = Value::Object(req_map);
+
+        // L'envoi de la requête est protégé par un timeout de 60s pour ne jamais bloquer indéfiniment.
         let mut attempt: u32 = 0;
         let res = loop {
             if is_cancel_requested() {
                 break None;
             }
-            let send_fut = client.post(&url).bearer_auth(api_key).json(&req).send();
-            let sent = tokio::time::timeout(Duration::from_secs(25), send_fut).await;
+            let mut req_builder = client.post(&url);
+            if !api_key.trim().is_empty() {
+                req_builder = req_builder.bearer_auth(api_key.trim());
+            }
+            let send_fut = req_builder.json(&req).send();
+            let sent = tokio::time::timeout(Duration::from_secs(60), send_fut).await;
             match sent {
                 Ok(Ok(r)) if r.status().is_success() => break Some(r),
                 Ok(Ok(r)) => {
@@ -292,7 +303,7 @@ where
                             accumulated_content, status, err_suffix
                         ));
                     }
-                    return Err(format!("Erreur API (HTTP {}): {}", status, err_text));
+                    return Err(format!("Erreur API Albert (HTTP {}): {}", status, err_text));
                 }
                 Ok(Err(e)) => {
                     if attempt + 1 < MAX_ATTEMPTS {
@@ -332,8 +343,7 @@ where
                         return Ok(accumulated_content);
                     }
                     return Err(
-                        "Délai d'attente dépassé lors de la connexion à l'API Albert (25s)."
-                            .to_string(),
+                        "Délai d'attente dépassé lors de la connexion à l'API Albert (60s).".to_string()
                     );
                 }
             }

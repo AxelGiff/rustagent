@@ -311,6 +311,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 old_content,
                 new_content: new_content_str.to_string(),
                 diff_lines,
+                status: crate::diff::DiffStatus::Pending,
             };
 
             // Register the generated content so `verify_project` can compile it
@@ -410,6 +411,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 old_content,
                 new_content,
                 diff_lines,
+                status: crate::diff::DiffStatus::Pending,
             };
 
             ToolResult {

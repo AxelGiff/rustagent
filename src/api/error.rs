@@ -39,28 +39,22 @@ impl ApiErrorCategory {
     pub fn user_message(&self) -> &'static str {
         match self {
             ApiErrorCategory::Authentication => {
-                "Authentication failed. Please check your Albert API key — it may be \
-                 missing, invalid, or expired. Set the ALBERT_API_KEY environment \
-                 variable or update your config file."
+                "Échec d'authentification. Veuillez vérifier votre clé API Albert dans les Réglages (⚙)."
             }
             ApiErrorCategory::RateLimit => {
-                "The Albert API is rate-limiting requests. Please wait a moment and \
-                 try again."
+                "Le service API applique une limite de requêtes (Rate Limit). Veuillez patienter un instant."
             }
             ApiErrorCategory::Network => {
-                "A network error occurred while contacting the Albert API. Please \
-                 check your internet connection and try again."
+                "Une erreur réseau est survenue lors de la connexion à l'API. Vérifiez votre connexion internet."
             }
             ApiErrorCategory::Timeout => {
-                "The request to the Albert API timed out. Please try again."
+                "Le délai d'attente lors de la connexion à l'API a expiré. Veuillez réessayer."
             }
             ApiErrorCategory::Model => {
-                "The Albert model returned an error. Please try rephrasing your \
-                 request."
+                "Le modèle d'IA a renvoyé une erreur. Essayez de reformuler votre demande."
             }
             ApiErrorCategory::Other => {
-                "An unexpected error occurred while contacting the Albert API. Please \
-                 try again."
+                "Une erreur inattendue est survenue lors de la communication avec l'API."
             }
         }
     }

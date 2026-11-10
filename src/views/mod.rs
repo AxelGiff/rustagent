@@ -12,7 +12,7 @@ pub mod workspace;
 
 pub use chat::chat_panel;
 pub use command_confirm::command_confirmation_bar;
-pub use diff_viewer::diff_viewer_panel;
+pub use diff_viewer::{DiffReviewState, changed_files_review_box, diff_viewer_panel};
 pub use editor::{code_editor_panel, create_editor_data, update_editor_if_matching};
 pub use file_tree::file_tree_panel;
 pub use settings::settings_page_view;

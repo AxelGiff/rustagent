@@ -511,7 +511,7 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
 
     let dir_display = project_dir.to_string_lossy().replace('\\', "/");
     let mut out = format!(
-        "\n\n[PROJET CIBLE PRÉ-CHARGÉ AUTOMATIQUEMENT : `{}`]\nFichiers du projet (DÉJÀ CONNUS — INTERDICTION d'appeler `list_directory` ou `search_files` !) :\n{}",
+        "\n\n[PROJET CIBLE PRÉ-CHARGÉ AUTOMATIQUEMENT : `{}`]\nAperçu des fichiers du projet (tu peux utiliser `list_directory`, `search_files` ou `read_file` pour explorer d'autres sous-dossiers si nécessaire) :\n{}",
         dir_display,
         if files.is_empty() {
             "(Dossier vide)".to_string()

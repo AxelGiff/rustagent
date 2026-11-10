@@ -1,6 +1,6 @@
 //! Streaming SSE delta accumulator for the agent loop.
 //!
-//! Encapsulates the mutable state that accumulates an OpenAI-compatible
+//! Encapsulates the mutable state that accumulates an Albert API
 //! streaming response: visible text, hidden reasoning (via [`ThinkingFilter`]),
 //! and tool calls that may be spread across many chunks.
 
