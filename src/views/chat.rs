@@ -4,6 +4,7 @@ use crate::api;
 use crate::config;
 use crate::types::{Message, Role, extract_spec_payload};
 use crate::views::diff_viewer::{DiffReviewState, changed_files_review_box};
+use crate::views::ui::{self, Tone};
 use freya::prelude::*;
 use std::collections::HashMap;
 
@@ -78,7 +79,15 @@ pub fn chat_panel(
                 let mut bubble = rect()
                     .padding(12.)
                     .background(bg_color)
-                    .corner_radius(16.)
+                    .corner_radius(14.)
+                    .border(Border::new().fill(c.border).width(1.))
+                    .shadow(
+                        Shadow::new()
+                            .x(0.)
+                            .y(2.)
+                            .blur(6.)
+                            .color(Color::from_argb(35, 0, 0, 0)),
+                    )
                     .color(text_color)
                     .text_align(text_align)
                     .spacing(10.)
@@ -351,6 +360,7 @@ pub fn chat_panel(
         model_options.insert(0, active_model.clone());
     }
 
+    let c_menu = c.clone();
     let model_items = model_options.into_iter().map({
         let active_model = active_model.clone();
         let settings_model_input = settings_model_input;
@@ -358,35 +368,33 @@ pub fn chat_panel(
             let is_selected = m == active_model;
             let m_choice = m.clone();
             let mut settings_model_input = settings_model_input.clone();
-            MenuItem::new()
-                .selected(is_selected)
-                .on_press(move |_| {
-                    *settings_model_input.write() = m_choice.clone();
-                    let mut cfg = config::ApiKeyConfig::load();
-                    cfg.model = Some(m_choice.clone());
-                    let _ = cfg.save();
-                })
-                .child(format!("🤖 {}", m))
+            ui::menu_item(format!("🤖 {}", m), is_selected, &c_menu, move |_| {
+                *settings_model_input.write() = m_choice.clone();
+                let mut cfg = config::ApiKeyConfig::load();
+                cfg.model = Some(m_choice.clone());
+                let _ = cfg.save();
+            })
         }
     });
 
-    let model_select = Select::new()
-        .selected_item(format!(
+    let model_select = ui::select(
+        format!(
             "🤖 {}",
             if active_model.is_empty() {
                 "Choisir modèle"
             } else {
                 &active_model
             }
-        ))
-        .children(model_items);
+        ),
+        model_items,
+        &c,
+    );
 
-    let refresh_models_button = Button::new()
-        .background(c.surface_tertiary)
-        .hover_background(c.tertiary)
-        .border_fill(Color::TRANSPARENT)
-        .color(c.text_secondary)
-        .on_press({
+    let refresh_models_button = ui::btn_sm(
+        if is_models_loading { "⟳ ..." } else { "⟳" },
+        Tone::Neutral,
+        &c,
+        {
             let available_models = available_models;
             let models_loading = models_loading;
             move |_| {
@@ -405,52 +413,37 @@ pub fn chat_panel(
                     *ml.write() = false;
                 });
             }
-        })
-        .child(if is_models_loading { "⟳ ..." } else { "⟳" });
+        },
+    );
 
-    let stop_button = Button::new()
-        .background(Color::from_rgb(220, 38, 38))
-        .hover_background(Color::from_rgb(185, 28, 28))
-        .border_fill(Color::TRANSPARENT)
-        .color(Color::WHITE)
-        .on_press(|_| {
-            api::request_cancel();
-        })
-        .child("⏹ Arrêter");
+    let stop_button = ui::btn_sm("⏹ Arrêter", Tone::Danger, &c, |_| {
+        api::request_cancel();
+    });
 
     let mode_toggle_button = {
         let mut is_spec_mode = is_spec_mode;
-        Button::new()
-            .background(if is_spec_val {
-                Color::from_rgb(16, 185, 129)
-            } else {
-                c.surface_tertiary
-            })
-            .hover_background(if is_spec_val {
-                Color::from_rgb(5, 150, 105)
-            } else {
-                c.tertiary
-            })
-            .border_fill(Color::TRANSPARENT)
-            .color(if is_spec_val {
-                Color::WHITE
-            } else {
-                c.text_primary
-            })
-            .on_press(move |_| {
-                *is_spec_mode.write() = !is_spec_val;
-            })
-            .child(if is_spec_val {
+        ui::btn_sm(
+            if is_spec_val {
                 "🛡️ Mode Spec"
             } else {
                 "⚡ Quick Edit"
-            })
+            },
+            if is_spec_val {
+                Tone::Success
+            } else {
+                Tone::Neutral
+            },
+            &c,
+            move |_| {
+                *is_spec_mode.write() = !is_spec_val;
+            },
+        )
     };
 
     // Input area with text input and model selector bar
     let input_area = rect()
         .width(Size::fill())
-        .height(Size::px(96.))
+        .height(Size::px(104.))
         .background(c.surface_primary)
         .border(Border::new().fill(c.border).width(BorderWidth {
             top: 1.,
@@ -463,18 +456,13 @@ pub fn chat_panel(
         .content(Content::Flex)
         .child(
             // Row 1: Chat input and send/stop button
-            rect()
-                .width(Size::fill())
-                .height(Size::px(38.))
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(8.)
-                .content(Content::Flex)
+            ui::row_fill(8.)
+                .height(Size::px(40.))
                 .child(
                     Input::new(input_value)
                         .background(c.surface_tertiary)
                         .focus_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
+                        .border_fill(c.border)
                         .color(c.text_secondary)
                         .placeholder(if is_spec_val {
                             "🛡️ Mode Spec : décrivez la fonctionnalité à spécifier (Security by Design)..."
@@ -487,40 +475,24 @@ pub fn chat_panel(
                 .child(if is_generating_val {
                     stop_button.into_element()
                 } else {
-                    Button::new()
-                        .background(c.surface_tertiary)
-                        .hover_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_secondary)
-                        .on_press(send_message_handler)
-                        .child("Envoyer")
-                        .into_element()
+                    ui::btn_sm("Envoyer", Tone::Primary, &c, send_message_handler).into_element()
                 }),
         )
         .child(
             // Row 2: Model select dropdown, refresh button, mode toggle and context label
-            rect()
-                .width(Size::fill())
-                .height(Size::px(32.))
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(8.)
-                .content(Content::Flex)
+            ui::row_fill(8.)
+                .height(Size::px(38.))
                 .child(model_select)
                 .child(refresh_models_button)
                 .child(mode_toggle_button)
                 .child(
-                    rect()
+                    ui::row(4.)
                         .width(Size::flex(1.))
-                        .horizontal()
-                        .cross_align(Alignment::Center)
                         .main_align(Alignment::End)
-                        .child(
-                            label()
-                                .text(format!("📁 {}  ·  📄 {}", project_name, current_file_display))
-                                .color(c.text_placeholder)
-                                .font_size(11.),
-                        ),
+                        .child(ui::muted(
+                            format!("📁 {}  ·  📄 {}", project_name, current_file_display),
+                            &c,
+                        )),
                 ),
         );
 

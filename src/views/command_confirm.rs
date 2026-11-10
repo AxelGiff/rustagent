@@ -1,6 +1,7 @@
 //! Confirmation bar shown when the assistant wants to run a shell command.
 
 use crate::tools::{PendingCommand, resolve_command, set_auto_approve};
+use crate::views::ui::{self, Tone};
 use freya::prelude::*;
 
 /// A bottom bar asking the user to approve or reject a shell command proposed
@@ -38,22 +39,18 @@ pub fn command_confirmation_bar(command: PendingCommand, colors: ColorsSheet) ->
         .corner_radius(6.)
         .content(Content::Flex)
         .spacing(4.)
-        .child(
-            label()
-                .font_family("Jetbrains Mono")
-                .font_size(12.5)
-                .text(format!("$ {}", command.command))
-                .color(colors.text_highlight),
-        );
+        .child(ui::mono(
+            format!("$ {}", command.command),
+            12.5,
+            colors.text_highlight,
+        ));
 
     if let Some(cwd) = command.cwd.clone() {
-        command_box = command_box.child(
-            label()
-                .font_family("Jetbrains Mono")
-                .font_size(11.)
-                .text(format!("cwd: {}", cwd))
-                .color(colors.text_secondary),
-        );
+        command_box = command_box.child(ui::mono(
+            format!("cwd: {}", cwd),
+            11.,
+            colors.text_secondary,
+        ));
     }
 
     rect()
@@ -69,44 +66,22 @@ pub fn command_confirmation_bar(command: PendingCommand, colors: ColorsSheet) ->
         .content(Content::Flex)
         .spacing(8.)
         .child(
-            label()
-                .text("⚠️ L'assistant demande à exécuter une commande — confirmation requise")
-                .color(colors.text_primary)
-                .font_size(13.)
-                .font_weight(FontWeight::BOLD),
+            ui::title(
+                "⚠️ L'assistant demande à exécuter une commande — confirmation requise",
+                &colors,
+            )
+            .font_size(13.),
         )
         .child(command_box)
         .child(
-            rect()
-                .horizontal()
-                .spacing(8.)
-                .cross_align(Alignment::Center)
-                .child(
-                    Button::new()
-                        .background(colors.success)
-                        .hover_background(Color::from_rgb(5, 150, 105))
-                        .border_fill(Color::TRANSPARENT)
-                        .color(Color::from_rgb(255, 255, 255))
-                        .on_press(on_accept)
-                        .child("✓ Exécuter"),
-                )
-                .child(
-                    Button::new()
-                        .background(colors.error)
-                        .hover_background(Color::from_rgb(185, 28, 28))
-                        .border_fill(Color::TRANSPARENT)
-                        .color(Color::from_rgb(255, 255, 255))
-                        .on_press(on_reject)
-                        .child("✗ Refuser"),
-                )
-                .child(
-                    Button::new()
-                        .background(colors.surface_tertiary)
-                        .hover_background(colors.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(colors.text_secondary)
-                        .on_press(on_always)
-                        .child("Toujours autoriser (session)"),
-                ),
+            ui::row(8.)
+                .child(ui::btn_sm("✓ Exécuter", Tone::Success, &colors, on_accept))
+                .child(ui::btn_sm("✗ Refuser", Tone::Danger, &colors, on_reject))
+                .child(ui::btn_sm(
+                    "⚡ Toujours autoriser (session)",
+                    Tone::Neutral,
+                    &colors,
+                    on_always,
+                )),
         )
 }

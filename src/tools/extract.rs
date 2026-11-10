@@ -225,8 +225,52 @@ pub fn extract_code_blocks_from_text(
     files
 }
 
+/// Reads a quoted string starting at `input` (whose first character is `"` or `'`),
+/// honoring `\` escapes and returning `(unescaped_string, bytes_consumed)`.
+fn read_quoted_value(input: &str) -> Option<(String, usize)> {
+    let mut chars = input.char_indices();
+    let (_, quote) = chars.next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut escaped = false;
+    for (idx, ch) in chars {
+        if escaped {
+            match ch {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => {}
+                '"' => out.push('"'),
+                '\'' => out.push('\''),
+                '\\' => out.push('\\'),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == quote {
+            return Some((out, idx + ch.len_utf8()));
+        }
+        out.push(ch);
+    }
+    // Si la chaîne est tronquée avant le guillemet fermant, on retourne quand même ce qu'on a lu
+    if !out.trim().is_empty() {
+        Some((out, input.len()))
+    } else {
+        None
+    }
+}
+
 /// Extraction tolérante de fichiers depuis une chaîne brute d'arguments d'outil
-/// (supporte JSON, kwargs Python style `path="...", content="..."`, syntaxe appel fonction, ou markdown fences).
+/// (supporte JSON, tableaux tronqués `files: [...]`, kwargs Python style `path="...", content="..."`, ou markdown fences).
 pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -241,7 +285,42 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
         }
     }
 
-    // 2. Tenter d'extraire path et content via des motifs flexibles (Python kwargs, unquoted JSON)
+    // 2. Scanner toutes les paires ("path": "...", "content": "...") dans la chaîne brute
+    let mut multi_results = Vec::new();
+    let mut scan = trimmed;
+    while let Some(p_idx) = ["\"path\":", "'path':", "\"file\":", "'file':"]
+        .iter()
+        .filter_map(|pat| scan.find(pat).map(|pos| (pos, pat.len())))
+        .min_by_key(|(pos, _)| *pos)
+    {
+        let after_path_key = scan[p_idx.0 + p_idx.1..].trim_start();
+        let Some((path_val, consumed_p)) = read_quoted_value(after_path_key) else {
+            scan = &after_path_key[1.min(after_path_key.len())..];
+            continue;
+        };
+        let rest_after_path = &after_path_key[consumed_p..];
+        if let Some(c_idx) = ["\"content\":", "'content':", "\"code\":", "'code':"]
+            .iter()
+            .filter_map(|pat| rest_after_path.find(pat).map(|pos| (pos, pat.len())))
+            .min_by_key(|(pos, _)| *pos)
+        {
+            let after_content_key = rest_after_path[c_idx.0 + c_idx.1..].trim_start();
+            if let Some((content_val, consumed_c)) = read_quoted_value(after_content_key) {
+                if !path_val.trim().is_empty() {
+                    multi_results.push((path_val.trim().to_string(), content_val));
+                }
+                scan = &after_content_key[consumed_c..];
+                continue;
+            }
+        }
+        scan = rest_after_path;
+    }
+
+    if !multi_results.is_empty() {
+        return multi_results;
+    }
+
+    // 3. Tenter d'extraire path et content via des motifs flexibles (Python kwargs, unquoted JSON)
     let mut path_opt = None;
     for key_pat in &[
         "\"path\":",
@@ -255,14 +334,10 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
     ] {
         if let Some(pos) = trimmed.find(key_pat) {
             let after = trimmed[pos + key_pat.len()..].trim_start();
-            let quote = after.chars().next().unwrap_or(' ');
-            if quote == '"' || quote == '\'' {
-                if let Some(end_q) = after[1..].find(quote) {
-                    let val = &after[1..1 + end_q];
-                    if !val.trim().is_empty() {
-                        path_opt = Some(val.to_string());
-                        break;
-                    }
+            if let Some((val, _)) = read_quoted_value(after) {
+                if !val.trim().is_empty() {
+                    path_opt = Some(val);
+                    break;
                 }
             } else {
                 let end = after
@@ -290,15 +365,8 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
     ] {
         if let Some(pos) = trimmed.find(key_pat) {
             let after = trimmed[pos + key_pat.len()..].trim_start();
-            let quote = after.chars().next().unwrap_or(' ');
-            if quote == '"' || quote == '\'' {
-                let end_q = after[1..].rfind(quote).unwrap_or(after.len() - 1);
-                let val = &after[1..1 + end_q];
-                content_opt = Some(
-                    val.replace("\\n", "\n")
-                        .replace("\\\"", "\"")
-                        .replace("\\'", "'"),
-                );
+            if let Some((val, _)) = read_quoted_value(after) {
+                content_opt = Some(val);
                 break;
             } else {
                 let end = after.rfind([')', '}']).unwrap_or(after.len());
@@ -315,7 +383,7 @@ pub fn extract_files_from_raw_str(raw: &str) -> Vec<(String, String)> {
         return vec![(p, c)];
     }
 
-    // 3. Extraction depuis des code fences Markdown présents dans la chaîne brute
+    // 4. Extraction depuis des code fences Markdown présents dans la chaîne brute
     extract_code_blocks_from_text(trimmed, None)
 }
 

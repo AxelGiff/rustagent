@@ -2,6 +2,7 @@
 
 use crate::agent;
 use crate::config;
+use crate::views::ui::{self, Tone};
 use freya::prelude::*;
 
 /// A dedicated, accessible full-page settings view for Albert API.
@@ -34,74 +35,83 @@ where
         move |_| {
             *endpoint_input.write() = agent::ALBERT_ENDPOINT.to_string();
             *model_input.write() = agent::ALBERT_MODEL.to_string();
-            *feedback.write() = "🏛️ Configuration Albert par défaut restaurée (deepseek-v4-flash).".to_string();
+            *feedback.write() =
+                "🏛️ Configuration Albert par défaut restaurée (deepseek-v4-flash).".to_string();
         }
     };
+
+    let model_list: Vec<String> = if models.is_empty() {
+        config::ALBERT_MODELS
+            .iter()
+            .map(|&s| s.to_string())
+            .collect()
+    } else {
+        models
+    };
+
+    let model_rows = model_list.into_iter().map({
+        let model_input = model_input.clone();
+        let c = c.clone();
+        let cur = current_selected.clone();
+        move |m| {
+            let is_active = m == cur;
+            let mut model_input_press = model_input.clone();
+            let m_selected = m.clone();
+            rect()
+                .width(Size::fill())
+                .padding(Gaps::new(6., 10., 6., 10.))
+                .background(if is_active {
+                    c.surface_tertiary
+                } else {
+                    Color::TRANSPARENT
+                })
+                .corner_radius(6.)
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .on_press(move |_| {
+                    *model_input_press.write() = m_selected.clone();
+                })
+                .child(
+                    label()
+                        .text(format!("{} 🤖 {}", if is_active { "✓" } else { " " }, m))
+                        .color(if is_active {
+                            c.text_primary
+                        } else {
+                            c.text_secondary
+                        })
+                        .font_size(12.),
+                )
+        }
+    });
 
     rect()
         .expanded()
         .background(c.background)
         .content(Content::Flex)
         .child(
-            // Top Navigation Bar
-            rect()
-                .width(Size::fill())
-                .height(Size::px(48.))
+            ui::panel_header(&c, 48.)
                 .padding(Gaps::new(6., 20., 6., 20.))
-                .background(c.surface_primary)
-                .border(Border::new().fill(c.border).width(BorderWidth {
-                    top: 0.,
-                    right: 0.,
-                    bottom: 1.,
-                    left: 0.,
-                }))
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .content(Content::Flex)
-                .spacing(14.)
+                .spacing(12.)
+                .child(ui::btn_sm(
+                    "← Retour au workspace",
+                    Tone::Neutral,
+                    &c,
+                    on_close.clone(),
+                ))
                 .child(
-                    Button::new()
-                        .background(c.surface_tertiary)
-                        .hover_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_primary)
-                        .on_press(on_close.clone())
-                        .child("← Retour au workspace"),
-                )
-                .child(
-                    rect()
+                    ui::row(8.)
                         .width(Size::flex(1.))
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .child(
-                            label()
-                                .text("⚙ Paramètres & Configuration Albert API")
-                                .color(c.text_primary)
-                                .font_size(15.)
-                                .font_weight(FontWeight::BOLD),
-                        ),
+                        .child(ui::title("⚙ Paramètres & Configuration Albert API", &c).font_size(15.)),
                 )
-                .child(
-                    Button::new()
-                        .background(c.surface_tertiary)
-                        .hover_background(c.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(c.text_primary)
-                        .on_press(reset_albert_defaults)
-                        .child("🏛️ Valeurs par défaut Albert"),
-                )
-                .child(
-                    Button::new()
-                        .background(Color::from_rgb(22, 163, 74))
-                        .hover_background(Color::from_rgb(21, 128, 61))
-                        .border_fill(Color::TRANSPARENT)
-                        .color(Color::WHITE)
-                        .on_press(on_save.clone())
-                        .child("💾 Enregistrer"),
-                ),
+                .child(ui::btn_sm(
+                    "🏛️ Valeurs par défaut Albert",
+                    Tone::Neutral,
+                    &c,
+                    reset_albert_defaults,
+                ))
+                .child(ui::btn_sm("💾 Enregistrer", Tone::Success, &c, on_save.clone())),
         )
         .child(
-            // Full-Page Scrollable Content Body
             rect()
                 .expanded()
                 .content(Content::Flex)
@@ -114,32 +124,18 @@ where
                             .content(Content::Flex)
                             .child(
                                 // Card: Albert API Key
-                                rect()
-                                    .width(Size::fill())
-                                    .padding(16.)
-                                    .background(c.surface_primary)
-                                    .corner_radius(8.)
-                                    .border(Border::new().fill(c.border).width(1.))
-                                    .spacing(8.)
-                                    .child(
-                                        label()
-                                            .text("Clé API Albert (Étalab)")
-                                            .color(c.text_primary)
-                                            .font_size(14.)
-                                            .font_weight(FontWeight::BOLD),
-                                    )
-                                    .child(
-                                        label()
-                                            .text("Clé d'authentification pour accéder aux modèles de la plateforme Albert API.")
-                                            .color(c.text_secondary)
-                                            .font_size(12.),
-                                    )
+                                ui::card(&c)
+                                    .child(ui::title("Clé API Albert (Étalab)", &c))
+                                    .child(ui::subtitle(
+                                        "Clé d'authentification pour accéder aux modèles de la plateforme Albert API.",
+                                        &c,
+                                    ))
                                     .child(
                                         Input::new(key_input)
                                             .mode(InputMode::Hidden('•'))
                                             .background(c.surface_secondary)
                                             .focus_background(c.surface_tertiary)
-                                            .border_fill(Color::TRANSPARENT)
+                                            .border_fill(c.border)
                                             .color(c.text_inverse)
                                             .placeholder("sk-...")
                                             .width(Size::fill()),
@@ -147,31 +143,17 @@ where
                             )
                             .child(
                                 // Card: Endpoint URL
-                                rect()
-                                    .width(Size::fill())
-                                    .padding(16.)
-                                    .background(c.surface_primary)
-                                    .corner_radius(8.)
-                                    .border(Border::new().fill(c.border).width(1.))
-                                    .spacing(8.)
-                                    .child(
-                                        label()
-                                            .text("URL Endpoint Albert API")
-                                            .color(c.text_primary)
-                                            .font_size(14.)
-                                            .font_weight(FontWeight::BOLD),
-                                    )
-                                    .child(
-                                        label()
-                                            .text("Endpoint officiel Albert : https://albert.api.etalab.gouv.fr/v1")
-                                            .color(c.text_secondary)
-                                            .font_size(12.),
-                                    )
+                                ui::card(&c)
+                                    .child(ui::title("URL Endpoint Albert API", &c))
+                                    .child(ui::subtitle(
+                                        "Endpoint officiel Albert : https://albert.api.etalab.gouv.fr/v1",
+                                        &c,
+                                    ))
                                     .child(
                                         Input::new(endpoint_input)
                                             .background(c.surface_secondary)
                                             .focus_background(c.surface_tertiary)
-                                            .border_fill(Color::TRANSPARENT)
+                                            .border_fill(c.border)
                                             .color(c.text_inverse)
                                             .placeholder("https://albert.api.etalab.gouv.fr/v1")
                                             .width(Size::fill()),
@@ -179,56 +161,37 @@ where
                             )
                             .child(
                                 // Card: Models selection
-                                rect()
-                                    .width(Size::fill())
-                                    .padding(16.)
-                                    .background(c.surface_primary)
-                                    .corner_radius(8.)
-                                    .border(Border::new().fill(c.border).width(1.))
+                                ui::card(&c)
                                     .spacing(10.)
                                     .content(Content::Flex)
                                     .child(
-                                        rect()
-                                            .width(Size::fill())
-                                            .horizontal()
-                                            .cross_align(Alignment::Center)
+                                        ui::row_fill(8.)
                                             .child(
                                                 rect()
                                                     .width(Size::flex(1.))
                                                     .spacing(2.)
-                                                    .child(
-                                                        label()
-                                                            .text("Modèle Albert sélectionné")
-                                                            .color(c.text_primary)
-                                                            .font_size(14.)
-                                                            .font_weight(FontWeight::BOLD),
-                                                    )
-                                                    .child(
-                                                        label()
-                                                            .text("Sélectionnez un modèle Albert ci-dessous ou saisissez son identifiant.")
-                                                            .color(c.text_secondary)
-                                                            .font_size(12.),
-                                                    ),
+                                                    .child(ui::title("Modèle Albert sélectionné", &c))
+                                                    .child(ui::subtitle(
+                                                        "Sélectionnez un modèle Albert ci-dessous ou saisissez son identifiant.",
+                                                        &c,
+                                                    )),
                                             )
-                                            .child(
-                                                Button::new()
-                                                    .background(c.surface_tertiary)
-                                                    .hover_background(c.tertiary)
-                                                    .border_fill(Color::TRANSPARENT)
-                                                    .color(c.text_primary)
-                                                    .on_press(on_refresh_models)
-                                                    .child(if is_loading {
-                                                        "⟳ Chargement..."
-                                                    } else {
-                                                        "⟳ Rafraîchir les modèles"
-                                                    }),
-                                            ),
+                                            .child(ui::btn_sm(
+                                                if is_loading {
+                                                    "⟳ Chargement..."
+                                                } else {
+                                                    "⟳ Rafraîchir les modèles"
+                                                },
+                                                Tone::Neutral,
+                                                &c,
+                                                on_refresh_models,
+                                            )),
                                     )
                                     .child(
-                                        Input::new(model_input.clone())
+                                        Input::new(model_input)
                                             .background(c.surface_secondary)
                                             .focus_background(c.surface_tertiary)
-                                            .border_fill(Color::TRANSPARENT)
+                                            .border_fill(c.border)
                                             .color(c.text_inverse)
                                             .placeholder("deepseek-v4-flash")
                                             .width(Size::fill()),
@@ -239,152 +202,36 @@ where
                                             .height(Size::px(180.))
                                             .background(c.surface_secondary)
                                             .corner_radius(6.)
+                                            .border(Border::new().fill(c.border).width(1.))
                                             .padding(6.)
-                                            .child(if models.is_empty() {
-                                                let suggestions = config::ALBERT_MODELS;
+                                            .child(
                                                 ScrollView::new().child(
-                                                    rect()
-                                                        .width(Size::fill())
-                                                        .spacing(4.)
-                                                        .children(suggestions.iter().map({
-                                                            let model_input = model_input.clone();
-                                                            let c = c.clone();
-                                                            let cur = current_selected.clone();
-                                                            move |&m| {
-                                                                let is_active = m == cur;
-                                                                let mut model_input_press = model_input.clone();
-                                                                let m_str = m.to_string();
-                                                                rect()
-                                                                    .width(Size::fill())
-                                                                    .padding(6.)
-                                                                    .background(if is_active {
-                                                                        c.surface_tertiary
-                                                                    } else {
-                                                                        Color::TRANSPARENT
-                                                                    })
-                                                                    .corner_radius(4.)
-                                                                    .horizontal()
-                                                                    .cross_align(Alignment::Center)
-                                                                    .on_press(move |_| {
-                                                                        *model_input_press.write() = m_str.clone();
-                                                                    })
-                                                                    .child(
-                                                                        label()
-                                                                            .text(format!(
-                                                                                "{} 🏛️ {}",
-                                                                                if is_active { "✓" } else { " " },
-                                                                                m
-                                                                            ))
-                                                                            .color(if is_active {
-                                                                                c.text_primary
-                                                                            } else {
-                                                                                c.text_secondary
-                                                                            })
-                                                                            .font_size(12.),
-                                                                    )
-                                                            }
-                                                        })),
-                                                )
-                                                .into_element()
-                                            } else {
-                                                ScrollView::new().child(
-                                                    rect()
-                                                        .width(Size::fill())
-                                                        .spacing(4.)
-                                                        .children(models.into_iter().map({
-                                                            let model_input = model_input.clone();
-                                                            let c = c.clone();
-                                                            let cur = current_selected.clone();
-                                                            move |m| {
-                                                                let m_clone = m.clone();
-                                                                let is_active = m == cur;
-                                                                let bg = if is_active {
-                                                                    c.surface_tertiary
-                                                                } else {
-                                                                    Color::TRANSPARENT
-                                                                };
-                                                                let mut model_input_press = model_input.clone();
-                                                                let m_selected = m.clone();
-                                                                rect()
-                                                                    .width(Size::fill())
-                                                                    .padding(6.)
-                                                                    .background(bg)
-                                                                    .corner_radius(4.)
-                                                                    .horizontal()
-                                                                    .cross_align(Alignment::Center)
-                                                                    .on_press(move |_| {
-                                                                        *model_input_press.write() = m_selected.clone();
-                                                                    })
-                                                                    .child(
-                                                                        label()
-                                                                            .text(format!(
-                                                                                "{} 🤖 {}",
-                                                                                if is_active { "✓" } else { " " },
-                                                                                m_clone
-                                                                            ))
-                                                                            .color(if is_active {
-                                                                                c.text_primary
-                                                                            } else {
-                                                                                c.text_secondary
-                                                                            })
-                                                                            .font_size(12.),
-                                                                    )
-                                                            }
-                                                        })),
-                                                )
-                                                .into_element()
-                                            }),
+                                                    ui::col(4.).children(model_rows),
+                                                ),
+                                            ),
                                     ),
                             )
                             .child(
                                 // Feedback / Status & Config file location
-                                rect()
-                                    .width(Size::fill())
-                                    .spacing(6.)
-                                    .child(
-                                        label()
-                                            .text(format!(
-                                                "Fichier de configuration locale : {}",
-                                                config::ApiKeyConfig::config_file_path().display()
-                                            ))
-                                            .color(c.text_placeholder)
-                                            .font_size(11.),
-                                    )
-                                    .child(if !feedback.read().is_empty() {
+                                ui::col(6.)
+                                    .child(ui::muted(
+                                        format!(
+                                            "Fichier de configuration locale : {}",
+                                            config::ApiKeyConfig::config_file_path().display()
+                                        ),
+                                        &c,
+                                    ))
+                                    .maybe_child((!feedback.read().is_empty()).then(|| {
                                         label()
                                             .text(feedback.read().clone())
                                             .color(c.warning)
                                             .font_size(12.)
-                                            .into_element()
-                                    } else {
-                                        rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-                                    }),
+                                    })),
                             )
                             .child(
-                                // Bottom action buttons
-                                rect()
-                                    .width(Size::fill())
-                                    .horizontal()
-                                    .cross_align(Alignment::Center)
-                                    .spacing(12.)
-                                    .child(
-                                        Button::new()
-                                            .background(Color::from_rgb(22, 163, 74))
-                                            .hover_background(Color::from_rgb(21, 128, 61))
-                                            .border_fill(Color::TRANSPARENT)
-                                            .color(Color::WHITE)
-                                            .on_press(on_save)
-                                            .child("💾 Enregistrer"),
-                                    )
-                                    .child(
-                                        Button::new()
-                                            .background(c.surface_tertiary)
-                                            .hover_background(c.tertiary)
-                                            .border_fill(Color::TRANSPARENT)
-                                            .color(c.text_primary)
-                                            .on_press(on_close)
-                                            .child("← Retour"),
-                                    ),
+                                ui::row(12.)
+                                    .child(ui::btn("💾 Enregistrer", Tone::Success, &c, on_save))
+                                    .child(ui::btn("← Retour", Tone::Neutral, &c, on_close)),
                             ),
                     ),
                 ),
