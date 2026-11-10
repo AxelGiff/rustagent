@@ -494,19 +494,6 @@ where
                 );
                 let is_list_call = call.function.name == "list_directory";
 
-                if is_list_call && list_dir_calls >= 1 {
-                    messages.push(ChatMessage {
-                        role: "tool".to_string(),
-                        content: Some(
-                            "⚠️ STOP LISTING : Tu as déjà listé le dossier. Passe directement à `write_plan`, `write_file` ou `edit_file`.".to_string(),
-                        ),
-                        tool_calls: None,
-                        tool_call_id: Some(call.id.clone()),
-                        name: Some(call.function.name.clone()),
-                    });
-                    continue;
-                }
-
                 if is_explore_call
                     && (read_calls_this_turn >= max_read_calls_per_turn
                         || total_read_calls >= max_total_read_calls)
@@ -849,11 +836,11 @@ where
                 {
                     if spec_mode && !intent.specs_already_answered {
                         content_to_send.push_str(
-                            "\n\n⚠️ ACTION OBLIGATOIRE AU PROCHAIN TOUR : Les outils de lecture sont maintenant désactivés. Si des choix manquent, appelle `ask_spec_questions` (1 à 3 questions max). Sinon, appelle `write_file` (avec `files: [...]`) ou `edit_file` !",
+                            "\n\n⚠️ ACTION OBLIGATOIRE AU PROCHAIN TOUR : Si des choix manquent, appelle `ask_spec_questions` (1 à 3 questions max). Sinon, appelle `write_file(path, content)` (un fichier par appel) ou `edit_file` !",
                         );
                     } else {
                         content_to_send.push_str(
-                            "\n\n⚠️ ACTION OBLIGATOIRE AU PROCHAIN TOUR : Les outils de lecture sont maintenant désactivés. Génère TOUS les fichiers en un seul tour avec `write_file` (utilise `files: [{path, content}, ...]` s'il y a plusieurs fichiers) ou `edit_file` !",
+                            "\n\n⚠️ ACTION OBLIGATOIRE AU PROCHAIN TOUR : Passe maintenant à l'écriture avec `write_file(path, content)` (un seul fichier par appel) ou `edit_file` !",
                         );
                     }
                 }

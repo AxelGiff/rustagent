@@ -18,6 +18,7 @@ pub struct DeltaAccumulator {
     thinking: ThinkingFilter,
     tool_calls: BTreeMap<usize, (String, String, String)>,
     announced_tools: BTreeSet<usize>,
+    last_tool_idx: usize,
     streamed_arg_bytes: usize,
     /// Last non-empty `finish_reason` reported by the provider
     /// (`"stop"`, `"tool_calls"`, `"length"`, ...). `"length"` means the
@@ -39,6 +40,7 @@ impl DeltaAccumulator {
             thinking: ThinkingFilter::new(),
             tool_calls: BTreeMap::new(),
             announced_tools: BTreeSet::new(),
+            last_tool_idx: 0,
             streamed_arg_bytes: 0,
             finish_reason: None,
         }
@@ -104,22 +106,45 @@ impl DeltaAccumulator {
 
             if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                 for call in calls {
-                    let idx = call["index"].as_u64().unwrap_or(0) as usize;
+                    let incoming_id = call
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
+                    let fn_name = call
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .or_else(|| call.get("name"))
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty());
+
+                    let mut idx = call
+                        .get("index")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n as usize)
+                        .unwrap_or(self.last_tool_idx);
+
+                    // Si le serveur réutilise index=0 pour un nouvel appel d'outil alors que
+                    // l'entrée courante contient déjà un appel complet, on alloue un nouvel index.
+                    if let Some(existing) = self.tool_calls.get(&idx)
+                        && !existing.1.is_empty()
+                        && !existing.2.is_empty()
+                        && (fn_name.is_some()
+                            || incoming_id.is_some_and(|id| !existing.0.is_empty() && id != existing.0))
+                    {
+                        idx = self.tool_calls.keys().max().map(|m| m + 1).unwrap_or(0);
+                    }
+                    self.last_tool_idx = idx;
+
                     let entry = self.tool_calls.entry(idx).or_insert((
                         String::new(),
                         String::new(),
                         String::new(),
                     ));
-                    if let Some(id) = call.get("id").and_then(|v| v.as_str())
+                    if let Some(id) = incoming_id
                         && entry.0.is_empty()
                     {
                         entry.0.push_str(id);
                     }
-                    let fn_name = call
-                        .get("function")
-                        .and_then(|f| f.get("name"))
-                        .or_else(|| call.get("name"))
-                        .and_then(|v| v.as_str());
                     if let Some(name) = fn_name {
                         if entry.1.is_empty() {
                             entry.1.push_str(name);

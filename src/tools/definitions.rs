@@ -44,31 +44,20 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "Crée ou remplace un ou plusieurs fichiers avec leur contenu complet. Pour créer plusieurs fichiers d'un projet complet en un seul appel, utilise le paramètre `files`. Pour un seul fichier, utilise `path` et `content`. Génère un diff prêt à valider par l'utilisateur.",
+                "description": "Crée ou remplace un fichier avec son contenu complet. Fournis OBLIGATOIREMENT `path` (chemin du fichier) et `content` (code complet du fichier). Appelle `write_file` une fois par fichier à créer. Génère un diff prêt à valider par l'utilisateur.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Chemin du fichier à créer ou modifier (ex: 'Pictures/halloween-menu/index.html')."
+                            "description": "Chemin du fichier à créer ou modifier (ex: 'src/main/java/com/example/demo/Message.java')."
                         },
                         "content": {
                             "type": "string",
                             "description": "Contenu textuel complet du code du fichier."
-                        },
-                        "files": {
-                            "type": "array",
-                            "description": "Liste de tous les fichiers du projet à générer d'un coup (ex: index.html, style.css, script.js).",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "path": { "type": "string", "description": "Chemin du fichier (ex: 'Pictures/halloween-menu/style.css')" },
-                                    "content": { "type": "string", "description": "Code complet du fichier" }
-                                },
-                                "required": ["path", "content"]
-                            }
                         }
-                    }
+                    },
+                    "required": ["path", "content"]
                 }
             }
         }),

@@ -1,5 +1,6 @@
 //! Code editor view panel component.
 
+use crate::views::ui::{self, Tone};
 use freya::code_editor::*;
 use freya::prelude::*;
 
@@ -22,89 +23,42 @@ pub fn code_editor_panel(
             .content(Content::Flex)
             .background(c.background)
             .child(
-                // Top subtle header bar
-                rect()
-                    .width(Size::fill())
-                    .height(Size::px(38.))
-                    .padding(Gaps::new(4., 12., 4., 12.))
-                    .background(c.surface_primary)
-                    .border(Border::new().fill(c.border).width(BorderWidth {
-                        top: 0.,
-                        right: 0.,
-                        bottom: 1.,
-                        left: 0.,
-                    }))
-                    .horizontal()
-                    .cross_align(Alignment::Center)
-                    .content(Content::Flex)
+                ui::panel_header(&c, 38.)
                     .child(
-                        rect()
+                        ui::row(8.)
                             .width(Size::flex(1.))
-                            .horizontal()
-                            .cross_align(Alignment::Center)
-                            .spacing(8.)
-                            .child(
-                                label()
-                                    .text("⚡ RustAgent — Revue & Éditeur")
-                                    .color(c.text_secondary)
-                                    .font_size(12.)
-                                    .font_weight(FontWeight::BOLD),
-                            ),
+                            .child(ui::subtitle("⚡ RustAgent — Revue & Éditeur", &c).font_weight(FontWeight::BOLD)),
                     )
                     .maybe_child((has_diffs_count > 0).then(|| {
-                        Button::new()
-                            .background(c.surface_tertiary)
-                            .hover_background(c.tertiary)
-                            .border_fill(c.border)
-                            .color(c.text_primary)
-                            .padding(Gaps::new(4., 10., 4., 10.))
-                            .on_press(move |_| on_view_diff())
-                            .child(
-                                label()
-                                    .text(format!("📂 Voir les fichiers modifiés ({})", has_diffs_count))
-                                    .font_size(11.)
-                                    .font_weight(FontWeight::BOLD),
-                            )
+                        ui::btn_sm(
+                            format!("📂 Voir les fichiers modifiés ({})", has_diffs_count),
+                            Tone::Subtle,
+                            &c,
+                            move |_| on_view_diff(),
+                        )
                     })),
             )
             .child(
-                // Centered empty-state showcase card
                 rect()
                     .width(Size::fill())
                     .height(Size::flex(1.))
-                    .main_align(Alignment::Center)
-                    .cross_align(Alignment::Center)
+                    .center()
                     .padding(24.)
                     .child(
-                        rect()
+                        ui::card(&c)
                             .width(Size::px(500.))
                             .padding(Gaps::new(28., 32., 28., 32.))
-                            .background(c.surface_primary)
                             .corner_radius(16.)
-                            .border(Border::new().fill(c.border).width(1.))
                             .cross_align(Alignment::Center)
                             .spacing(14.)
-                            .child(
-                                // Top accent pill
-                                rect()
-                                    .padding(Gaps::new(4., 12., 4., 12.))
-                                    .background(Color::from_af32rgb(0.14, 16, 185, 129))
-                                    .border(
-                                        Border::new()
-                                            .fill(Color::from_rgb(16, 185, 129))
-                                            .width(1.),
-                                    )
-                                    .corner_radius(99.)
-                                    .child(
-                                        label()
-                                            .text("🛡️ RUSTAGENT · ALBERT API WORKSPACE")
-                                            .color(Color::from_rgb(52, 211, 153))
-                                            .font_size(10.)
-                                            .font_weight(FontWeight::BOLD),
-                                    ),
-                            )
+                            .child(ui::pill(
+                                "🛡️ RUSTAGENT · ALBERT API WORKSPACE",
+                                Tone::Success,
+                                &c,
+                            ))
                             .child(
                                 label()
+                                    .width(Size::fill())
                                     .text("Pas de fichiers en diff pour le moment")
                                     .color(c.text_primary)
                                     .font_size(18.)
@@ -112,59 +66,19 @@ pub fn code_editor_panel(
                                     .text_align(TextAlign::Center),
                             )
                             .child(
-                                label()
-                                    .text("Envoyez une instruction à l'agent dans la conversation à droite pour générer ou modifier du code avec revue de diff ligne par ligne, ou ouvrez un fichier depuis l'explorateur à gauche.")
-                                    .color(c.text_secondary)
-                                    .font_size(12.)
-                                    .text_align(TextAlign::Center),
+                                ui::subtitle(
+                                    "Envoyez une instruction à l'agent dans la conversation à droite pour générer ou modifier du code avec revue de diff ligne par ligne, ou ouvrez un fichier depuis l'explorateur à gauche.",
+                                    &c,
+                                )
+                                .width(Size::fill())
+                                .text_align(TextAlign::Center),
                             )
                             .child(
-                                // Feature badges row
-                                rect()
-                                    .horizontal()
-                                    .main_align(Alignment::Center)
-                                    .cross_align(Alignment::Center)
-                                    .spacing(8.)
+                                ui::row(8.)
                                     .padding(Gaps::new(6., 0., 0., 0.))
-                                    .child(
-                                        rect()
-                                            .padding(Gaps::new(5., 10., 5., 10.))
-                                            .background(c.surface_secondary)
-                                            .border(Border::new().fill(c.border).width(1.))
-                                            .corner_radius(8.)
-                                            .child(
-                                                label()
-                                                    .text("⚡ Quick Edit")
-                                                    .color(c.text_secondary)
-                                                    .font_size(11.),
-                                            ),
-                                    )
-                                    .child(
-                                        rect()
-                                            .padding(Gaps::new(5., 10., 5., 10.))
-                                            .background(c.surface_secondary)
-                                            .border(Border::new().fill(c.border).width(1.))
-                                            .corner_radius(8.)
-                                            .child(
-                                                label()
-                                                    .text("🛡️ Mode Spec")
-                                                    .color(c.text_secondary)
-                                                    .font_size(11.),
-                                            ),
-                                    )
-                                    .child(
-                                        rect()
-                                            .padding(Gaps::new(5., 10., 5., 10.))
-                                            .background(c.surface_secondary)
-                                            .border(Border::new().fill(c.border).width(1.))
-                                            .corner_radius(8.)
-                                            .child(
-                                                label()
-                                                    .text("📝 Revue Diff")
-                                                    .color(c.text_secondary)
-                                                    .font_size(11.),
-                                            ),
-                                    ),
+                                    .child(ui::pill("⚡ Quick Edit", Tone::Subtle, &c))
+                                    .child(ui::pill("🛡️ Mode Spec", Tone::Subtle, &c))
+                                    .child(ui::pill("📝 Revue Diff", Tone::Subtle, &c)),
                             ),
                     ),
             )
@@ -176,66 +90,24 @@ pub fn code_editor_panel(
         .content(Content::Flex)
         .background(c.background)
         .child(
-            rect()
-                .width(Size::fill())
-                .height(Size::px(36.))
-                .padding(Gaps::new(4., 8., 4., 8.))
-                .background(c.surface_primary)
-                .border(Border::new().fill(c.border).width(BorderWidth {
-                    top: 0.,
-                    right: 0.,
-                    bottom: 1.,
-                    left: 0.,
-                }))
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .content(Content::Flex)
+            ui::panel_header(&c, 38.)
                 .child(
-                    rect()
+                    ui::row(8.)
                         .width(Size::flex(1.))
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .spacing(8.)
-                        .child(
-                            label()
-                                .text(file_name)
-                                .color(c.text_primary)
-                                .font_size(13.)
-                                .font_weight(FontWeight::BOLD),
-                        ),
+                        .child(ui::title(file_name, &c).font_size(13.)),
                 )
                 .child(
-                    rect()
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .spacing(6.)
+                    ui::row(6.)
                         .maybe_child((has_diffs_count > 0).then(|| {
-                            Button::new()
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(c.border)
-                                .color(c.text_primary)
-                                .on_press(move |_| on_view_diff())
-                                .child(format!("📂 Diffs ({})", has_diffs_count))
+                            ui::btn_sm(
+                                format!("📂 Diffs ({})", has_diffs_count),
+                                Tone::Subtle,
+                                &c,
+                                move |_| on_view_diff(),
+                            )
                         }))
-                        .child(
-                            Button::new()
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(Color::TRANSPARENT)
-                                .color(c.text_secondary)
-                                .on_press(move |_| on_save())
-                                .child("💾 Sauvegarder"),
-                        )
-                        .child(
-                            Button::new()
-                                .background(c.surface_tertiary)
-                                .hover_background(c.tertiary)
-                                .border_fill(Color::TRANSPARENT)
-                                .color(c.text_secondary)
-                                .on_press(move |_| on_execute())
-                                .child("Execute Code"),
-                        ),
+                        .child(ui::btn_sm("💾 Sauvegarder", Tone::Neutral, &c, move |_| on_save()))
+                        .child(ui::btn_sm("▶ Exécuter", Tone::Primary, &c, move |_| on_execute())),
                 ),
         )
         .child(

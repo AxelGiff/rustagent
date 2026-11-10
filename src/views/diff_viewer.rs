@@ -4,6 +4,7 @@ use crate::diff::{self, DiffStatus};
 use crate::language::SupportedLanguage;
 use crate::types::{CenterViewMode, Message, Role};
 use crate::views::editor::update_editor_if_matching;
+use crate::views::ui::{self, Tone};
 use freya::code_editor::CodeEditorData;
 use freya::prelude::*;
 
@@ -119,11 +120,21 @@ impl DiffReviewState {
                 }
                 if let Err(e) = diff::apply_diff_to_disk(d) {
                     errors.push(e);
-                    continue;
+                } else {
+                    d.status = DiffStatus::Accepted;
+                    applied.push((d.path.clone(), d.new_content.clone()));
                 }
-                d.status = DiffStatus::Accepted;
-                applied.push((d.path.clone(), d.new_content.clone()));
             }
+        }
+
+        for (path, new_content) in &applied {
+            update_editor_if_matching(
+                path,
+                new_content,
+                &self.file_name.read(),
+                self.editor,
+                self.current_language,
+            );
         }
 
         for err in errors {
@@ -133,20 +144,10 @@ impl DiffReviewState {
             });
         }
 
-        for (path, new_content) in applied {
-            update_editor_if_matching(
-                &path,
-                &new_content,
-                &self.file_name.read(),
-                self.editor,
-                self.current_language,
-            );
-        }
-
         *self.center_view_mode.write() = CenterViewMode::Editor;
     }
 
-    /// Permanently rejects the pending diff at `idx`.
+    /// Permanently rejects a `Pending` diff.
     /// Once rejected, a file cannot be accepted or restored.
     pub fn reject_diff(mut self, idx: usize) {
         let maybe_revert = {
@@ -218,6 +219,29 @@ impl DiffReviewState {
     }
 }
 
+/// Renders a single numbered unified diff line (`Deleted`, `Added`, or `Unchanged`).
+fn render_diff_line(
+    ln: usize,
+    prefix: &str,
+    text: &str,
+    bg: Color,
+    fg: Color,
+    ln_col: Color,
+) -> Element {
+    rect()
+        .width(Size::fill())
+        .horizontal()
+        .background(bg)
+        .padding(Gaps::new(2., 8., 2., 8.))
+        .child(
+            rect()
+                .width(Size::px(38.))
+                .child(ui::mono(format!("{:>3} ", ln), 11.5, ln_col)),
+        )
+        .child(ui::mono(format!("{} {}", prefix, text), 12., fg))
+        .into_element()
+}
+
 /// Helper to build numbered diff lines (`old_ln`, `new_ln`, `DiffLine`) for unified diff display.
 fn build_numbered_diff_rows(
     diff_lines: &[diff::DiffLine],
@@ -237,16 +261,14 @@ fn build_numbered_diff_rows(
                     .width(Size::fill())
                     .padding(Gaps::new(4., 10., 4., 10.))
                     .background(colors.surface_primary)
-                    .child(
-                        label()
-                            .font_family("Jetbrains Mono")
-                            .font_size(11.)
-                            .text(format!(
-                                "... +{} ligne(s) — cliquez sur « 🔍 Grand écran » pour tout voir",
-                                remaining
-                            ))
-                            .color(colors.text_secondary),
-                    )
+                    .child(ui::mono(
+                        format!(
+                            "... +{} ligne(s) — cliquez sur « 🔍 Grand écran » pour tout voir",
+                            remaining
+                        ),
+                        11.,
+                        colors.text_secondary,
+                    ))
                     .into_element(),
             );
             break;
@@ -254,60 +276,55 @@ fn build_numbered_diff_rows(
 
         match d_line {
             diff::DiffLine::Deleted(text) => {
+                let ln = old_ln;
                 old_ln += 1;
-                elements.push(
-                    rect()
-                        .width(Size::fill())
-                        .padding(Gaps::new(2., 8., 2., 8.))
-                        .background(Color::from_argb(45, 239, 68, 68))
-                        .child(
-                            label()
-                                .font_family("Jetbrains Mono")
-                                .font_size(12.)
-                                .text(format!("{:>3}     - {}", old_ln - 1, text))
-                                .color(Color::from_rgb(248, 113, 113)),
-                        )
-                        .into_element(),
-                );
+                elements.push(render_diff_line(
+                    ln,
+                    "-",
+                    text,
+                    Color::from_argb(45, 239, 68, 68),
+                    Color::from_rgb(252, 165, 165),
+                    Color::from_rgb(185, 80, 80),
+                ));
             }
             diff::DiffLine::Added(text) => {
+                let ln = new_ln;
                 new_ln += 1;
-                elements.push(
-                    rect()
-                        .width(Size::fill())
-                        .padding(Gaps::new(2., 8., 2., 8.))
-                        .background(Color::from_argb(45, 34, 197, 94))
-                        .child(
-                            label()
-                                .font_family("Jetbrains Mono")
-                                .font_size(12.)
-                                .text(format!("    {:>3} + {}", new_ln - 1, text))
-                                .color(Color::from_rgb(74, 222, 128)),
-                        )
-                        .into_element(),
-                );
+                elements.push(render_diff_line(
+                    ln,
+                    "+",
+                    text,
+                    Color::from_argb(45, 34, 197, 94),
+                    Color::from_rgb(134, 239, 172),
+                    Color::from_rgb(80, 185, 100),
+                ));
             }
             diff::DiffLine::Unchanged(text) => {
+                let ln = new_ln;
                 old_ln += 1;
                 new_ln += 1;
-                elements.push(
-                    rect()
-                        .width(Size::fill())
-                        .padding(Gaps::new(2., 8., 2., 8.))
-                        .child(
-                            label()
-                                .font_family("Jetbrains Mono")
-                                .font_size(12.)
-                                .text(format!("{:>3} {:>3}   {}", old_ln - 1, new_ln - 1, text))
-                                .color(colors.text_secondary),
-                        )
-                        .into_element(),
-                );
+                elements.push(render_diff_line(
+                    ln,
+                    " ",
+                    text,
+                    Color::TRANSPARENT,
+                    colors.text_secondary,
+                    colors.text_placeholder,
+                ));
             }
         }
     }
 
     elements
+}
+
+/// Renders the status badge (`✅ Accepté` or `❌ Rejeté`, or empty when `Pending`).
+fn render_status_tag(status: DiffStatus, c: &ColorsSheet) -> Element {
+    match status {
+        DiffStatus::Pending => ui::empty(),
+        DiffStatus::Accepted => ui::tag("✅ Accepté", Tone::Success, c).into_element(),
+        DiffStatus::Rejected => ui::tag("❌ Rejeté", Tone::Danger, c).into_element(),
+    }
 }
 
 /// Center panel diff viewer with a dropdown selector (`Select`) to switch between modified files.
@@ -321,11 +338,7 @@ pub fn diff_viewer_panel(
             .expanded()
             .center()
             .background(colors.background)
-            .child(
-                label()
-                    .text("Aucun diff à afficher.")
-                    .color(colors.text_secondary),
-            )
+            .child(ui::subtitle("Aucun diff à afficher.", &colors))
             .into_element();
     }
 
@@ -341,7 +354,8 @@ pub fn diff_viewer_panel(
     let (added_lines, deleted_lines) = diff::diff_stats(diff);
 
     // Dropdown menu (`Select`) to pick any modified file with an arrow
-    let file_menu_items = diffs.iter().enumerate().map(|(idx, item)| {
+    let c_menu = colors.clone();
+    let file_menu_items = diffs.iter().enumerate().map(move |(idx, item)| {
         let is_selected = idx == active_idx;
         let short_name = std::path::Path::new(&item.path)
             .file_name()
@@ -354,29 +368,33 @@ pub fn diff_viewer_panel(
             DiffStatus::Rejected => "❌ ",
         };
         let mut sel = diff_review.selected_diff_idx;
-        MenuItem::new()
-            .selected(is_selected)
-            .on_press(move |_| {
-                *sel.write() = idx;
-            })
-            .child(format!(
+        ui::menu_item(
+            format!(
                 "{}. {}{} (+{} -{})",
                 idx + 1,
                 status_prefix,
                 short_name,
                 add,
                 del
-            ))
+            ),
+            is_selected,
+            &c_menu,
+            move |_| {
+                *sel.write() = idx;
+            },
+        )
     });
 
-    let file_select = Select::new()
-        .selected_item(format!(
-            "📄 {} ({}/{}) ▾",
+    let file_select = ui::select(
+        format!(
+            "📄 {} ({}/{})",
             active_short_name,
             active_idx + 1,
             diff_count
-        ))
-        .children(file_menu_items);
+        ),
+        file_menu_items,
+        &colors,
+    );
 
     let line_elements = build_numbered_diff_rows(&diff.diff_lines, None, &colors);
     let mut center_mode_back = diff_review.center_view_mode;
@@ -386,114 +404,25 @@ pub fn diff_viewer_panel(
         .content(Content::Flex)
         .background(colors.background)
         .child(
-            // Single clean header bar with dropdown selector (`Select`) + path + stats + Back button
-            rect()
-                .width(Size::fill())
-                .height(Size::px(42.))
-                .padding(Gaps::new(4., 12., 4., 12.))
-                .background(colors.surface_primary)
-                .border(Border::new().fill(colors.border).width(BorderWidth {
-                    top: 0.,
-                    right: 0.,
-                    bottom: 1.,
-                    left: 0.,
-                }))
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .content(Content::Flex)
-                .spacing(8.)
+            ui::panel_header(&colors, 46.)
                 .child(
-                    rect()
+                    ui::row(8.)
                         .width(Size::flex(1.))
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .spacing(8.)
                         .child(file_select)
-                        .child(
-                            rect()
-                                .padding(Gaps::new(3., 8., 3., 8.))
-                                .background(colors.surface_secondary)
-                                .corner_radius(4.)
-                                .border(Border::new().fill(colors.border).width(1.))
-                                .child(
-                                    label()
-                                        .text(diff_path)
-                                        .color(colors.text_highlight)
-                                        .font_size(11.5),
-                                ),
-                        )
-                        .child(
-                            rect()
-                                .padding(Gaps::new(2., 6., 2., 6.))
-                                .background(Color::from_argb(35, 34, 197, 94))
-                                .corner_radius(4.)
-                                .child(
-                                    label()
-                                        .text(format!("+{}", added_lines))
-                                        .color(Color::from_rgb(74, 222, 128))
-                                        .font_size(11.5)
-                                        .font_weight(FontWeight::BOLD),
-                                ),
-                        )
-                        .child(
-                            rect()
-                                .padding(Gaps::new(2., 6., 2., 6.))
-                                .background(Color::from_argb(35, 239, 68, 68))
-                                .corner_radius(4.)
-                                .child(
-                                    label()
-                                        .text(format!("-{}", deleted_lines))
-                                        .color(Color::from_rgb(248, 113, 113))
-                                        .font_size(11.5)
-                                        .font_weight(FontWeight::BOLD),
-                                ),
-                        )
-                        .child(match diff_status {
-                            DiffStatus::Accepted => rect()
-                                .padding(Gaps::new(3., 8., 3., 8.))
-                                .background(Color::from_argb(40, 34, 197, 94))
-                                .corner_radius(4.)
-                                .child(
-                                    label()
-                                        .text("✅ Accepté")
-                                        .color(Color::from_rgb(74, 222, 128))
-                                        .font_size(11.5)
-                                        .font_weight(FontWeight::BOLD),
-                                )
-                                .into_element(),
-                            DiffStatus::Rejected => rect()
-                                .padding(Gaps::new(3., 8., 3., 8.))
-                                .background(Color::from_argb(40, 239, 68, 68))
-                                .corner_radius(4.)
-                                .child(
-                                    label()
-                                        .text("❌ Rejeté")
-                                        .color(Color::from_rgb(248, 113, 113))
-                                        .font_size(11.5)
-                                        .font_weight(FontWeight::BOLD),
-                                )
-                                .into_element(),
-                            DiffStatus::Pending => rect()
-                                .width(Size::px(0.))
-                                .height(Size::px(0.))
-                                .into_element(),
-                        }),
+                        .child(ui::tag(diff_path, Tone::Subtle, &colors))
+                        .child(ui::diff_stats(added_lines, deleted_lines, &colors))
+                        .child(render_status_tag(diff_status, &colors)),
                 )
-                .child(
-                    Button::new()
-                        .background(colors.surface_tertiary)
-                        .hover_background(colors.tertiary)
-                        .border_fill(Color::TRANSPARENT)
-                        .color(colors.text_primary)
-                        .corner_radius(4.)
-                        .on_press(move |_| {
-                            *center_mode_back.write() = CenterViewMode::Editor;
-                        })
-                        .child("← Retour Éditeur"),
-                ),
+                .child(ui::btn_sm(
+                    "← Retour Éditeur",
+                    Tone::Neutral,
+                    &colors,
+                    move |_| {
+                        *center_mode_back.write() = CenterViewMode::Editor;
+                    },
+                )),
         )
         .child(
-            // Scrollable diff area
             rect()
                 .width(Size::fill())
                 .height(Size::flex(1.))
@@ -515,10 +444,7 @@ pub fn changed_files_review_box(
 ) -> Element {
     let diffs = diff_review.pending_diffs.read().clone();
     if diffs.is_empty() {
-        return rect()
-            .width(Size::px(0.))
-            .height(Size::px(0.))
-            .into_element();
+        return ui::empty();
     }
 
     let total_files = diffs.len();
@@ -550,7 +476,7 @@ pub fn changed_files_review_box(
                 let item_status = item.status;
                 let is_rejected = item_status == DiffStatus::Rejected;
                 let is_expanded = !is_rejected && inline_idx == Some(idx);
-                let is_selected = idx == active_idx;
+                let is_selected = idx == active_idx && !is_rejected;
                 let (added, deleted) = diff::diff_stats(item);
                 let is_new_file = item.old_content.trim().is_empty();
                 let short_name = std::path::Path::new(&item.path)
@@ -565,81 +491,16 @@ pub fn changed_files_review_box(
                     Vec::new()
                 };
 
-                let status_badge = match item_status {
-                    DiffStatus::Pending => rect()
-                        .width(Size::px(0.))
-                        .height(Size::px(0.))
-                        .into_element(),
-                    DiffStatus::Accepted => rect()
-                        .padding(Gaps::new(2., 6., 2., 6.))
-                        .background(Color::from_argb(40, 34, 197, 94))
-                        .corner_radius(4.)
-                        .child(
-                            label()
-                                .text("✅ Accepté")
-                                .font_size(10.)
-                                .font_weight(FontWeight::BOLD)
-                                .color(Color::from_rgb(74, 222, 128)),
-                        )
-                        .into_element(),
-                    DiffStatus::Rejected => rect()
-                        .padding(Gaps::new(2., 6., 2., 6.))
-                        .background(Color::from_argb(40, 239, 68, 68))
-                        .corner_radius(4.)
-                        .child(
-                            label()
-                                .text("❌ Rejeté")
-                                .font_size(10.)
-                                .font_weight(FontWeight::BOLD)
-                                .color(Color::from_rgb(248, 113, 113)),
-                        )
-                        .into_element(),
-                };
-
-                rect()
-                    .width(Size::fill())
-                    .background(colors.surface_primary)
-                    .corner_radius(6.)
-                    .border(
-                        Border::new()
-                            .fill(if is_selected && !is_rejected {
-                                colors.primary
-                            } else {
-                                colors.border
-                            })
-                            .width(1.),
-                    )
-                    .padding(Gaps::new(6., 10., 6., 10.))
-                    .spacing(4.)
+                ui::item_card(&colors, is_selected)
                     .child(
-                        // Line 1: Badges + File Name + (+A -D)
-                        rect()
-                            .width(Size::fill())
-                            .horizontal()
-                            .cross_align(Alignment::Center)
-                            .spacing(6.)
-                            .child(
-                                rect()
-                                    .padding(Gaps::new(2., 5., 2., 5.))
-                                    .background(if is_new_file {
-                                        Color::from_argb(40, 34, 197, 94)
-                                    } else {
-                                        Color::from_argb(40, 234, 179, 8)
-                                    })
-                                    .corner_radius(4.)
-                                    .child(
-                                        label()
-                                            .text(if is_new_file { "NOUVEAU" } else { "MODIFIÉ" })
-                                            .font_size(9.5)
-                                            .font_weight(FontWeight::BOLD)
-                                            .color(if is_new_file {
-                                                Color::from_rgb(74, 222, 128)
-                                            } else {
-                                                Color::from_rgb(250, 204, 21)
-                                            }),
-                                    ),
-                            )
-                            .child(status_badge)
+                        // Line 1: New/Modified tag + Status + Filename + (+A -D)
+                        ui::row_fill(6.)
+                            .child(if is_new_file {
+                                ui::tag("NOUVEAU", Tone::Success, &colors)
+                            } else {
+                                ui::tag("MODIFIÉ", Tone::Warning, &colors)
+                            })
+                            .child(render_status_tag(item_status, &colors))
                             .child(
                                 label()
                                     .text(short_name)
@@ -651,138 +512,48 @@ pub fn changed_files_review_box(
                                         colors.text_primary
                                     }),
                             )
-                            .child(
-                                rect()
-                                    .padding(Gaps::new(1., 5., 1., 5.))
-                                    .background(Color::from_argb(35, 34, 197, 94))
-                                    .corner_radius(4.)
-                                    .child(
-                                        label()
-                                            .text(format!("+{}", added))
-                                            .font_size(11.)
-                                            .font_weight(FontWeight::BOLD)
-                                            .color(Color::from_rgb(74, 222, 128)),
-                                    ),
-                            )
-                            .child(
-                                rect()
-                                    .padding(Gaps::new(1., 5., 1., 5.))
-                                    .background(Color::from_argb(35, 239, 68, 68))
-                                    .corner_radius(4.)
-                                    .child(
-                                        label()
-                                            .text(format!("-{}", deleted))
-                                            .font_size(11.)
-                                            .font_weight(FontWeight::BOLD)
-                                            .color(Color::from_rgb(248, 113, 113)),
-                                    ),
-                            ),
+                            .child(ui::diff_stats(added, deleted, &colors)),
                     )
-                    .child(
-                        // Line 2: Full relative path
-                        label()
-                            .text(full_path)
-                            .font_size(10.5)
-                            .color(colors.text_secondary),
-                    )
-                    .child(if !is_rejected {
-                        // Line 3: Action buttons (hidden completely if file is Rejected!)
-                        rect()
-                            .width(Size::fill())
-                            .horizontal()
-                            .cross_align(Alignment::Center)
-                            .spacing(6.)
-                            .child(
-                                Button::new()
-                                    .background(colors.surface_secondary)
-                                    .hover_background(colors.surface_tertiary)
-                                    .border_fill(colors.border)
-                                    .corner_radius(4.)
-                                    .padding(Gaps::new(3., 8., 3., 8.))
-                                    .on_press(move |_| diff_review.toggle_inline_diff(idx))
-                                    .child(
-                                        label()
-                                            .text(if is_expanded {
-                                                "▾ Masquer le diff"
-                                            } else {
-                                                "▸ Voir le diff ici"
-                                            })
-                                            .font_size(11.)
-                                            .color(colors.text_primary),
-                                    ),
-                            )
-                            .child(
-                                Button::new()
-                                    .background(colors.surface_secondary)
-                                    .hover_background(colors.surface_tertiary)
-                                    .border_fill(colors.border)
-                                    .corner_radius(4.)
-                                    .padding(Gaps::new(3., 8., 3., 8.))
-                                    .on_press(move |_| diff_review.open_diff_at(idx))
-                                    .child(
-                                        label()
-                                            .text("🔍 Grand écran")
-                                            .font_size(11.)
-                                            .color(colors.text_highlight),
-                                    ),
-                            )
-                            .child(if item_status == DiffStatus::Pending {
-                                Button::new()
-                                    .background(Color::from_rgb(22, 163, 74))
-                                    .hover_background(Color::from_rgb(21, 128, 61))
-                                    .border_fill(Color::TRANSPARENT)
-                                    .corner_radius(4.)
-                                    .padding(Gaps::new(3., 8., 3., 8.))
-                                    .on_press(move |_| diff_review.accept_diff(idx))
-                                    .child(
-                                        label()
-                                            .text("✓ Accepter")
-                                            .font_size(11.)
-                                            .font_weight(FontWeight::BOLD)
-                                            .color(Color::WHITE),
-                                    )
-                                    .into_element()
-                            } else {
-                                rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-                            })
-                            .child(if item_status == DiffStatus::Pending {
-                                Button::new()
-                                    .background(Color::from_rgb(220, 38, 38))
-                                    .hover_background(Color::from_rgb(185, 28, 28))
-                                    .border_fill(Color::TRANSPARENT)
-                                    .corner_radius(4.)
-                                    .padding(Gaps::new(3., 8., 3., 8.))
-                                    .on_press(move |_| diff_review.reject_diff(idx))
-                                    .child(
-                                        label()
-                                            .text("✗ Rejeter")
-                                            .font_size(11.)
-                                            .font_weight(FontWeight::BOLD)
-                                            .color(Color::WHITE),
-                                    )
-                                    .into_element()
-                            } else {
-                                rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-                            })
-                            .into_element()
-                    } else {
-                        rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-                    })
-                    .child(if is_expanded {
+                    .child(ui::muted(full_path, &colors))
+                    .maybe_child((!is_rejected).then(|| {
+                        // Line 3: Action buttons (hidden completely once a file is Rejected)
+                        ui::row_fill(6.)
+                            .child(ui::btn_sm(
+                                if is_expanded {
+                                    "▾ Masquer le diff"
+                                } else {
+                                    "▸ Voir le diff ici"
+                                },
+                                Tone::Subtle,
+                                &colors,
+                                move |_| diff_review.toggle_inline_diff(idx),
+                            ))
+                            .child(ui::btn_sm(
+                                "🔍 Grand écran",
+                                Tone::Subtle,
+                                &colors,
+                                move |_| diff_review.open_diff_at(idx),
+                            ))
+                            .maybe_child((item_status == DiffStatus::Pending).then(|| {
+                                ui::btn_sm("✓ Accepter", Tone::Success, &colors, move |_| {
+                                    diff_review.accept_diff(idx)
+                                })
+                            }))
+                            .maybe_child((item_status == DiffStatus::Pending).then(|| {
+                                ui::btn_sm("✗ Rejeter", Tone::Danger, &colors, move |_| {
+                                    diff_review.reject_diff(idx)
+                                })
+                            }))
+                    }))
+                    .maybe_child(is_expanded.then(|| {
                         rect()
                             .width(Size::fill())
                             .padding(Gaps::new(6., 4., 4., 4.))
                             .background(colors.background)
-                            .corner_radius(4.)
+                            .corner_radius(6.)
                             .border(Border::new().fill(colors.border).width(1.))
                             .children(inline_diff_rows)
-                            .into_element()
-                    } else {
-                        rect()
-                            .width(Size::px(0.))
-                            .height(Size::px(0.))
-                            .into_element()
-                    })
+                    }))
                     .into_element()
             })
             .collect()
@@ -790,152 +561,59 @@ pub fn changed_files_review_box(
         Vec::new()
     };
 
-    rect()
-        .width(Size::fill())
-        .padding(12.)
-        .background(colors.surface_secondary)
-        .corner_radius(8.)
-        .border(Border::new().fill(colors.primary).width(1.5))
-        .spacing(8.)
+    ui::accent_card(&colors, colors.primary)
         .child(
-            // Header Row 1: Clickable Arrow Button (`▸` / `▾`) to unfold/fold the file list + Stats + Status
-            rect()
-                .width(Size::fill())
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(8.)
-                .child(
-                    Button::new()
-                        .background(colors.surface_primary)
-                        .hover_background(colors.surface_tertiary)
-                        .border_fill(colors.border)
-                        .corner_radius(5.)
-                        .padding(Gaps::new(4., 10., 4., 10.))
-                        .on_press(move |_| diff_review.toggle_review_box())
-                        .child(
-                            label()
-                                .text(format!(
-                                    "{} 🗂️ Revue des fichiers modifiés ({})",
-                                    if box_expanded { "▾" } else { "▸" },
-                                    total_files
-                                ))
-                                .font_size(12.5)
-                                .font_weight(FontWeight::BOLD)
-                                .color(colors.text_primary),
-                        ),
-                )
-                .child(
-                    rect()
-                        .padding(Gaps::new(2., 6., 2., 6.))
-                        .background(Color::from_argb(35, 34, 197, 94))
-                        .corner_radius(4.)
-                        .child(
-                            label()
-                                .text(format!("+{}", total_added))
-                                .font_size(11.5)
-                                .font_weight(FontWeight::BOLD)
-                                .color(Color::from_rgb(74, 222, 128)),
-                        ),
-                )
-                .child(
-                    rect()
-                        .padding(Gaps::new(2., 6., 2., 6.))
-                        .background(Color::from_argb(35, 239, 68, 68))
-                        .corner_radius(4.)
-                        .child(
-                            label()
-                                .text(format!("-{}", total_deleted))
-                                .font_size(11.5)
-                                .font_weight(FontWeight::BOLD)
-                                .color(Color::from_rgb(248, 113, 113)),
-                        ),
-                )
+            // Header Row 1: Clickable Arrow Button (`▸` / `▾`) + Stats + Summary Status
+            ui::row_fill(8.)
+                .child(ui::btn_sm(
+                    format!(
+                        "{} 🗂️ Revue des fichiers modifiés ({})",
+                        if box_expanded { "▾" } else { "▸" },
+                        total_files
+                    ),
+                    Tone::Subtle,
+                    &colors,
+                    move |_| diff_review.toggle_review_box(),
+                ))
+                .child(ui::diff_stats(total_added, total_deleted, &colors))
                 .child(if pending_count == 0 && accepted_count == total_files {
-                    label()
-                        .text("✅ Tout accepté")
-                        .font_size(11.5)
-                        .color(Color::from_rgb(74, 222, 128))
-                        .into_element()
+                    ui::tag("✅ Tout accepté", Tone::Success, &colors).into_element()
                 } else if pending_count == 0 && rejected_count == total_files {
-                    label()
-                        .text("❌ Tout rejeté")
-                        .font_size(11.5)
-                        .color(Color::from_rgb(248, 113, 113))
-                        .into_element()
+                    ui::tag("❌ Tout rejeté", Tone::Danger, &colors).into_element()
                 } else if pending_count == 0 {
-                    label()
-                        .text(format!("{}/{} accepté(s)", accepted_count, total_files))
-                        .font_size(11.5)
-                        .color(colors.text_secondary)
-                        .into_element()
+                    ui::tag(
+                        format!("{}/{} accepté(s)", accepted_count, total_files),
+                        Tone::Neutral,
+                        &colors,
+                    )
+                    .into_element()
                 } else {
-                    rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
+                    ui::empty()
                 }),
         )
-        .child(if pending_count > 0 || accepted_count > 0 {
-            // Header Row 2: Global Action Buttons (only shown while there are pending or accepted files)
-            rect()
-                .width(Size::fill())
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(8.)
-                .child(
-                    Button::new()
-                        .background(colors.surface_primary)
-                        .hover_background(colors.surface_tertiary)
-                        .border_fill(colors.border)
-                        .corner_radius(5.)
-                        .padding(Gaps::new(4., 10., 4., 10.))
-                        .on_press(move |_| diff_review.open_diff_at(active_idx))
-                        .child(
-                            label()
-                                .text("🔍 Ouvrir dans l'éditeur")
-                                .font_size(11.5)
-                                .color(colors.text_highlight),
-                        ),
-                )
-                .child(if pending_count > 0 {
-                    Button::new()
-                        .background(Color::from_rgb(22, 163, 74))
-                        .hover_background(Color::from_rgb(21, 128, 61))
-                        .border_fill(Color::TRANSPARENT)
-                        .corner_radius(5.)
-                        .padding(Gaps::new(4., 10., 4., 10.))
-                        .on_press(move |_| diff_review.accept_all())
-                        .child(
-                            label()
-                                .text(format!("✓ Tout accepter ({})", pending_count))
-                                .font_size(11.5)
-                                .font_weight(FontWeight::BOLD)
-                                .color(Color::WHITE),
-                        )
-                        .into_element()
-                } else {
-                    rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-                })
-                .child(if pending_count > 0 {
-                    Button::new()
-                        .background(Color::from_rgb(220, 38, 38))
-                        .hover_background(Color::from_rgb(185, 28, 28))
-                        .border_fill(Color::TRANSPARENT)
-                        .corner_radius(5.)
-                        .padding(Gaps::new(4., 10., 4., 10.))
-                        .on_press(move |_| diff_review.reject_all())
-                        .child(
-                            label()
-                                .text("✗ Tout rejeter")
-                                .font_size(11.5)
-                                .font_weight(FontWeight::BOLD)
-                                .color(Color::WHITE),
-                        )
-                        .into_element()
-                } else {
-                    rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-                })
-                .into_element()
-        } else {
-            rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
-        })
+        .maybe_child((pending_count > 0 || accepted_count > 0).then(|| {
+            // Header Row 2: Global Action Buttons
+            ui::row_fill(8.)
+                .child(ui::btn_sm(
+                    "🔍 Ouvrir dans l'éditeur",
+                    Tone::Subtle,
+                    &colors,
+                    move |_| diff_review.open_diff_at(active_idx),
+                ))
+                .maybe_child((pending_count > 0).then(|| {
+                    ui::btn_sm(
+                        format!("✓ Tout accepter ({})", pending_count),
+                        Tone::Success,
+                        &colors,
+                        move |_| diff_review.accept_all(),
+                    )
+                }))
+                .maybe_child((pending_count > 0).then(|| {
+                    ui::btn_sm("✗ Tout rejeter", Tone::Danger, &colors, move |_| {
+                        diff_review.reject_all()
+                    })
+                }))
+        }))
         .children(file_cards)
         .into_element()
 }

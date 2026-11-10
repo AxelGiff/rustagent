@@ -8,6 +8,7 @@ pub mod file_tree;
 pub mod settings;
 pub mod terminal;
 pub mod toolbar;
+pub mod ui;
 pub mod workspace;
 
 pub use chat::chat_panel;

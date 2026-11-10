@@ -200,7 +200,18 @@ pub fn finalize_tool_calls(
         let clean_args = if let Ok(val) = serde_json::from_str::<Value>(args) {
             val.to_string()
         } else {
-            parse_lenient_tool_args(args).to_string()
+            let repaired = parse_lenient_tool_args(args);
+            let is_non_empty = repaired
+                .as_object()
+                .map(|o| !o.is_empty())
+                .unwrap_or_else(|| repaired.is_array());
+            if is_non_empty {
+                repaired.to_string()
+            } else if !args.trim().is_empty() {
+                args.clone()
+            } else {
+                "{}".to_string()
+            }
         };
         calls_vec.push(ToolCall {
             id: call_id,

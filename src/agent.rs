@@ -98,12 +98,9 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
 - Si des choix d'architecture/sécurité manquent ET qu'aucune question n'a encore été posée, appelle IMMÉDIATEMENT `ask_spec_questions` avec des questions claires au format : `{{ \"questions\": [{{ \"id\": \"q1\", \"question\": \"... ?\", \"options\": [\"(Recommandé) ...\", \"...\"] }}] }}` (1 à 3 questions courtes max, option sécurisée `(Recommandé)` en premier). Ne laisse JAMAIS le tableau vide.
 2. PLANIFICATION PUIS IMPLÉMENTATION COMPLÈTE ET AUTONOME :
 - Planifie d'abord avec `update_tasks` (étapes concrètes) et maintiens le `status` à jour (`pending`/`in_progress`/`done`). Ne t'arrête JAMAIS tant qu'une tâche reste incomplète.
-- Implémente avec `write_file` :
+- Implémente avec `write_file` ou `edit_file` :
 - Dès que les spécifications sont validées (ou si la demande est déjà claire), `plan.md` est déjà généré automatiquement !
-- CRÉATION DE PROJET COMPLET EN UN SEUL APPEL : Pour une application ou un projet complet (ex: index.html, style.css, script.js, composants), utilise le paramètre `files` de `write_file` pour générer TOUS les fichiers d'un coup :
-  `write_file(files: [{{ \"path\": \"dossier/index.html\", \"content\": \"...code complet...\" }}, {{ \"path\": \"dossier/style.css\", \"content\": \"...code complet...\" }}, {{ \"path\": \"dossier/app.js\", \"content\": \"...code complet...\" }}])`.
-  Si un seul fichier est nécessaire : `write_file(path: \"...\", content: \"...\")`.
-- ⚠️ BUDGET DE SORTIE LIMITÉ : si les fichiers sont longs (ex : app Three.js avec index.html + style.css + app.js de plusieurs centaines de lignes), n'utilise PAS `files` en un seul appel — écris UN SEUL fichier par appel `write_file`, en commençant par le plus important. Un appel trop gros dépasse la limite de tokens, la réponse est tronquée et tes arguments arrivent vides (erreur \\\"argument 'path' manquant\\\").
+- RÈGLE STRICTE POUR `write_file` : Appelle TOUJOURS `write_file(path: \"...\", content: \"...\")` avec UN SEUL fichier par appel (fournis obligatoirement `path` et `content`). N'utilise JAMAIS de paramètre `files` ou de tableau de fichiers. Écris les fichiers un par un : la boucle te redonne immédiatement la main après chaque fichier créé !
 - RÈGLE D'AUTONOMIE TOTALE : Ne laisse aucun fichier manquant, aucun placeholder de type \"[À compléter]\", et n'interromps pas la génération. L'application créée doit être 100% exécutable, belle et directement fonctionnelle.
 - RÈGLE ABSOLUE : Tu dois TOUJOURS inclure le code source COMPLET dans chaque argument \"content\". N'appelle JAMAIS `write_file` avec des arguments vides !
 3. VÉRIFICATION ET CORRECTION AUTOMATIQUE (OBLIGATOIRE) :
@@ -130,7 +127,7 @@ DÉMARCHE :
 2. EXPLORE : lis le code concerné (`read_file`, `search_files`) AVANT de modifier. Ne DEVINE JAMAIS un extrait.
 3. IMPLÉMENTE :
 - Modification ciblée : `edit_file` avec `target` = extrait EXACT copié depuis `read_file`. En cas d'échec, l'erreur renvoie le contenu du fichier : corrige `target` et réessaie.
-- Nouveau fichier : `write_file(path, content)`. Plusieurs PETITS fichiers d'un coup : `write_file(files: [{{ \"path\": \"...\", \"content\": \"...\" }}, ...])`. Fichiers longs : UN SEUL par appel (sinon la réponse est tronquée et les arguments sont perdus).
+- Nouveau fichier : appelle `write_file(path: \"...\", content: \"...\")` avec UN SEUL fichier par appel (`path` et `content` obligatoires). N'utilise JAMAIS de tableau `files`. Crée les fichiers un par un : la boucle agentique enchaîne automatiquement chaque fichier jusqu'à la fin du plan.
 - Code COMPLET, sans placeholder, directement exécutable.
 4. VÉRIFIE : `verify_project` (compile/tests sur une copie temporaire). Corrige les erreurs (STDERR) puis re-vérifie jusqu'à obtenir `🔎 Vérification OK ✅`.
 5. CONCLUS seulement quand toutes les tâches sont `done` ET la vérification passe.
