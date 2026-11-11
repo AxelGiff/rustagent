@@ -22,6 +22,7 @@ const IGNORED_DIRS: &[&str] = &[
     "node_modules",
     "target",
     ".git",
+    ".gradle",
     "dist",
     "build",
     ".venv",
@@ -256,6 +257,39 @@ pub fn detect_commands(root: &Path) -> Vec<String> {
         commands.push("go test ./...".to_string());
     }
 
+    // Java / Kotlin : Gradle (Spring Boot, etc.), Maven, ou fichiers .java autonomes
+    let is_gradle = has("build.gradle")
+        || has("build.gradle.kts")
+        || has("settings.gradle")
+        || has("settings.gradle.kts");
+    let is_maven = has("pom.xml");
+
+    if is_gradle {
+        if has("gradlew") || has("gradlew.bat") {
+            commands.push("sh ./gradlew compileJava --console=plain -q".to_string());
+        } else {
+            commands.push("gradle compileJava --console=plain -q".to_string());
+        }
+    } else if is_maven {
+        if has("mvnw") || has("mvnw.cmd") {
+            commands.push("sh ./mvnw test-compile -B -q".to_string());
+        } else {
+            commands.push("mvn test-compile -B -q".to_string());
+        }
+    } else {
+        let java_files = collect_files(root, &["java"], 25);
+        if !java_files.is_empty() {
+            commands.push(format!(
+                "javac {}",
+                java_files
+                    .iter()
+                    .map(|f| shell_quote(f))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+    }
+
     let py_files = collect_files(root, &["py"], 25);
     if !py_files.is_empty() {
         commands.push(format!(
@@ -372,6 +406,11 @@ const PROJECT_MANIFESTS: &[&str] = &[
     "package.json",
     "tsconfig.json",
     "go.mod",
+    "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "pom.xml",
     "pyproject.toml",
     "setup.py",
     "requirements.txt",
@@ -379,10 +418,9 @@ const PROJECT_MANIFESTS: &[&str] = &[
 
 /// Walk up from `base` until a directory containing a project manifest is found.
 ///
-/// Without this, a modification confined to `src/...` would resolve to the `src`
-/// directory (its common parent) and no build command would ever be detected.
-/// Climbing only happens when `base` already exists on disk, so a brand-new
-/// project (whose directory may not exist yet) keeps the caller-provided root.
+/// Without this, a modification confined to `src/...` (or a newly created Java package
+/// directory inside `src/main/java/...`) would resolve to that inner folder and no build
+/// command would ever be detected.
 fn climb_to_project_root(base: &str) -> String {
     let trimmed = base.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -396,13 +434,11 @@ fn climb_to_project_root(base: &str) -> String {
     } else {
         cwd.join(&start)
     };
-    if !absolute.is_dir() {
-        return base.to_string();
-    }
 
+    // Walk up ancestors (even if the deepest newly-staged subdirectory does not exist on disk yet)
     let mut cur: Option<&Path> = Some(absolute.as_path());
     while let Some(dir) = cur {
-        if PROJECT_MANIFESTS.iter().any(|m| dir.join(m).exists()) {
+        if dir.is_dir() && PROJECT_MANIFESTS.iter().any(|m| dir.join(m).exists()) {
             return match dir.strip_prefix(&cwd) {
                 Ok(r) if r.as_os_str().is_empty() => ".".to_string(),
                 Ok(r) => r.to_string_lossy().replace('\\', "/"),

@@ -13,8 +13,8 @@ pub mod workspace;
 
 pub use chat::chat_panel;
 pub use command_confirm::command_confirmation_bar;
-pub use diff_viewer::{DiffReviewState, changed_files_review_box, diff_viewer_panel};
-pub use editor::{code_editor_panel, create_editor_data, update_editor_if_matching};
+pub use diff_viewer::{DiffReviewState, diff_viewer_panel};
+pub use editor::{code_editor_panel, create_editor_data, load_file_into_editor};
 pub use file_tree::file_tree_panel;
 pub use settings::settings_page_view;
 pub use terminal::{spawn_terminal, terminal_panel};

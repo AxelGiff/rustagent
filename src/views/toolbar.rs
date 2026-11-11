@@ -16,6 +16,7 @@ pub fn app_toolbar(
     models_loading: Writable<bool>,
     _settings_endpoint_input: Readable<String>,
     _settings_key_input: Readable<String>,
+    mut on_open_project: impl FnMut() + 'static,
     mut on_clear_chat: impl FnMut() + 'static,
     mut on_reset_terminal: impl FnMut() + 'static,
     c: ColorsSheet,
@@ -45,7 +46,13 @@ pub fn app_toolbar(
         .child(
             ui::row(8.)
                 .child(ui::title("⚡ RustAgent", &c).font_size(15.))
-                .child(ui::pill("Albert API", Tone::Primary, &c)),
+                .child(ui::pill("Albert API", Tone::Primary, &c))
+                .child(ui::btn_sm(
+                    "📂 Ouvrir un projet",
+                    Tone::Subtle,
+                    &c,
+                    move |_| on_open_project(),
+                )),
         )
         .child(ui::spacer())
         .child(ui::select(

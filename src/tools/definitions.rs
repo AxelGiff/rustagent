@@ -156,7 +156,7 @@ pub fn get_tool_definitions() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "verify_project",
-                "description": "Compile et teste le projet sur une COPIE TEMPORAIRE (le projet réel n'est pas modifié). Détecte automatiquement le type de projet (Cargo.toml → cargo check, package.json → npm install + build, tsconfig.json → tsc --noEmit, fichiers .js → node --check, .py → py_compile, go.mod → go build) et renvoie les erreurs. À appeler OBLIGATOIREMENT après avoir écrit les fichiers, puis corriger et rappeler jusqu'à ce que ça passe.",
+                "description": "Compile et teste le projet sur une COPIE TEMPORAIRE (le projet réel n'est pas modifié). Détecte automatiquement le type de projet (Cargo.toml → cargo check, build.gradle / gradlew → ./gradlew compileJava, pom.xml → ./mvnw test-compile, package.json → npm install + build, tsconfig.json → tsc --noEmit, fichiers .java → javac, .js → node --check, .py → py_compile, go.mod → go build) et renvoie les erreurs. À appeler OBLIGATOIREMENT après avoir écrit les fichiers, puis corriger et rappeler jusqu'à ce que ça passe.",
                 "parameters": {
                     "type": "object",
                     "properties": {

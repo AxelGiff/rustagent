@@ -416,10 +416,8 @@ pub fn normalize_spec_questions(args: &Value, user_hint: &str) -> Value {
     json!(normalized)
 }
 
-/// Détecte automatiquement un dossier de projet mentionné dans le prompt ou l'historique
-/// et pré-charge la liste de ses fichiers principaux pour éviter au modèle d'appeler
-/// `list_directory` / `search_files` en boucle.
-pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> String {
+/// Détecte et renvoie le chemin du dossier de projet mentionné dans le prompt ou l'historique.
+pub fn detect_project_dir(user_msg: &str, history_texts: &[String]) -> Option<std::path::PathBuf> {
     let mut combined = String::from(user_msg);
     for h in history_texts.iter().rev().take(6) {
         combined.push('\n');
@@ -437,6 +435,7 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
     }) {
         let token = raw_token
             .trim()
+            .trim_start_matches('@')
             .trim_matches(|c: char| c == '.' || c == ',' || c == ';');
         if token.len() < 3 {
             continue;
@@ -451,10 +450,11 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
                     .filter(|par| par.is_dir())
                     .map(|par| par.to_path_buf())
             };
-            if let Some(d) = dir
-                && !candidate_dirs.contains(&d)
-            {
-                candidate_dirs.push(d);
+            if let Some(d) = dir {
+                let root = infer_project_root_from_path(&d).unwrap_or(d);
+                if !candidate_dirs.contains(&root) {
+                    candidate_dirs.push(root);
+                }
             }
         } else if (token.contains('-') || token.contains('_')) && !token.starts_with('-') {
             if let Some(home) = user_home_dir() {
@@ -485,7 +485,7 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
     }
 
     let cwd = std::env::current_dir().ok();
-    let target_dir = candidate_dirs.into_iter().find(|d| {
+    candidate_dirs.into_iter().find(|d| {
         if let Some(ref c) = cwd
             && d == c
         {
@@ -497,9 +497,76 @@ pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> Stri
             return false;
         }
         true
-    });
+    })
+}
 
-    let Some(project_dir) = target_dir else {
+/// Remonte les dossiers parents d'un fichier ou sous-dossier pour trouver la racine logique du projet
+/// (manifeste `Cargo.toml`, `package.json`, `build.gradle`, `pom.xml`, `pyproject.toml`, `go.mod`, `.git`,
+/// ou dossier enfant direct de `Pictures`/`Documents`/`Desktop`/`Projects`).
+pub fn infer_project_root_from_path(path: &Path) -> Option<std::path::PathBuf> {
+    let start_dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()?.to_path_buf()
+    };
+
+    let home = user_home_dir();
+    let manifests = [
+        "Cargo.toml",
+        "package.json",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "pom.xml",
+        "pyproject.toml",
+        "go.mod",
+        ".git",
+        "plan.md",
+    ];
+
+    let mut cur = start_dir.as_path();
+    let mut fallback_existing: Option<std::path::PathBuf> = None;
+
+    loop {
+        if let Some(ref h) = home
+            && cur == h.as_path()
+        {
+            break;
+        }
+        if cur.is_dir() {
+            if fallback_existing.is_none() {
+                fallback_existing = Some(cur.to_path_buf());
+            }
+            if manifests.iter().any(|m| cur.join(m).exists()) {
+                return Some(cur.to_path_buf());
+            }
+            // Si le parent de `cur` est `~/Pictures`, `~/Documents`, `~/Desktop` ou `~/Projects`,
+            // alors `cur` est directement le dossier racine du projet (ex: `~/Pictures/blanc-manger-coco`).
+            if let Some(parent) = cur.parent()
+                && let Some(parent_name) = parent.file_name().and_then(|n| n.to_str())
+                && matches!(
+                    parent_name.to_lowercase().as_str(),
+                    "pictures" | "documents" | "desktop" | "projects" | "downloads"
+                )
+            {
+                return Some(cur.to_path_buf());
+            }
+        }
+        match cur.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() && parent != cur => cur = parent,
+            _ => break,
+        }
+    }
+
+    fallback_existing
+}
+
+/// Détecte automatiquement un dossier de projet mentionné dans le prompt ou l'historique
+/// et pré-charge la liste de ses fichiers principaux pour éviter au modèle d'appeler
+/// `list_directory` / `search_files` en boucle.
+pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> String {
+    let Some(project_dir) = detect_project_dir(user_msg, history_texts) else {
         return String::new();
     };
 

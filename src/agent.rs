@@ -80,6 +80,60 @@ pub fn build_env_context(editor_code: &str, editor_file: &str, project_snapshot:
     )
 }
 
+/// Builds a high-priority context block for files and directories explicitly pinned
+/// by the user via the `+` button in the file tree.
+pub fn build_pinned_context(pinned_paths: &[std::path::PathBuf]) -> String {
+    if pinned_paths.is_empty() {
+        return String::new();
+    }
+
+    let mut sections = Vec::new();
+    for path in pinned_paths {
+        let display_path = path.to_string_lossy().replace('\\', "/");
+        if path.is_dir() {
+            let listing = crate::file_tree::list_directory_bounded(path, 35);
+            let entries_preview = if listing.entries.is_empty() {
+                "(dossier vide)".to_string()
+            } else {
+                listing
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        if e.is_dir {
+                            format!("`{}/`", e.name)
+                        } else {
+                            format!("`{}`", e.name)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            sections.push(format!(
+                "- 📁 **Dossier cible** : `{}`\n  INSTRUCTION : Tu DOIS créer ou modifier les fichiers demandés à l'intérieur de ce dossier (`{}`).\n  Contenu immédiat : {}",
+                display_path, display_path, entries_preview
+            ));
+        } else {
+            let content_preview = match std::fs::read_to_string(path) {
+                Ok(text) if !text.trim().is_empty() => {
+                    let truncated = tools::truncate_output(&text, 100, 4000);
+                    format!("```\n{}\n```", truncated)
+                }
+                Ok(_) => "(fichier vide)".to_string(),
+                Err(_) => "(fichier non lisible ou à créer)".to_string(),
+            };
+            sections.push(format!(
+                "- 📄 **Fichier cible** : `{}`\n  INSTRUCTION : Applique directement les modifications demandées sur ce fichier (`{}`) via `edit_file` ou `write_file`.\n{}",
+                display_path, display_path, content_preview
+            ));
+        }
+    }
+
+    format!(
+        "\n\n[🎯 CIBLES EXPLICITES ÉPINGLÉES PAR L'UTILISATEUR (PRIORITÉ ABSOLUE)]\nL'utilisateur a sélectionné manuellement ces cibles dans l'arborescence pour t'indiquer exactement où agir :\n{}",
+        sections.join("\n")
+    )
+}
+
 /// Builds the system prompt tailored to Spec Mode (Security by Design) or Quick Edit Mode.
 pub fn build_system_prompt(
     spec_mode: bool,
@@ -225,6 +279,7 @@ pub async fn run_agent_turn(
     history: Vec<Message>,
     current_editor_code: String,
     current_editor_file: String,
+    pinned_paths: Vec<std::path::PathBuf>,
     pending_diffs: Vec<diff::PendingDiff>,
     wants_code: bool,
     detected_language: SupportedLanguage,
@@ -289,20 +344,27 @@ pub async fn run_agent_turn(
         ));
     }
 
-    // `detect_project_snapshot` parcourt récursivement le disque : hors runtime async.
-    let project_snapshot = {
+    // `detect_project_snapshot` et `build_pinned_context` parcourent le disque : hors runtime async.
+    let (project_snapshot, pinned_context) = {
         let message = user_message.clone();
         let history_texts = history_texts.clone();
+        let pinned_paths = pinned_paths.clone();
         tokio::task::spawn_blocking(move || {
-            tools::detect_project_snapshot(&message, &history_texts)
+            let snap = tools::detect_project_snapshot(&message, &history_texts);
+            let pinned = build_pinned_context(&pinned_paths);
+            (snap, pinned)
         })
         .await
         .unwrap_or_default()
     };
-    let env_context = build_env_context(
-        &current_editor_code,
-        &current_editor_file,
-        &project_snapshot,
+    let env_context = format!(
+        "{}{}",
+        build_env_context(
+            &current_editor_code,
+            &current_editor_file,
+            &project_snapshot,
+        ),
+        pinned_context
     );
 
     let plan_context = if let Ok(plan_text) = tokio::fs::read_to_string("plan.md").await {
