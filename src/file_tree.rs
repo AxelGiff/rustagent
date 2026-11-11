@@ -187,6 +187,8 @@ pub struct WorkspaceEntry {
     pub full_path: PathBuf,
     /// Whether this entry is a directory.
     pub is_dir: bool,
+    /// Whether this file was recently saved (e.g. via VS Code Ctrl+S).
+    pub is_recent: bool,
 }
 
 /// Cached flat index of workspace files and folders for instant `@` autocomplete.
@@ -213,36 +215,46 @@ impl WorkspaceMentionIndex {
     }
 
     /// Filters indexed entries matching the `@query` string, up to `limit` results.
+    /// Files recently modified in VS Code (Ctrl+S) are ranked first.
     pub fn filter_suggestions(&self, query: &str, limit: usize) -> Vec<WorkspaceEntry> {
         let q = query.trim().to_lowercase().replace('\\', "/");
         if q.is_empty() {
-            return self.entries.iter().take(limit).cloned().collect();
+            let mut all = self.entries.clone();
+            all.sort_by(|a, b| {
+                b.is_recent
+                    .cmp(&a.is_recent)
+                    .then_with(|| a.is_dir.cmp(&b.is_dir))
+                    .then_with(|| a.rel_path.cmp(&b.rel_path))
+            });
+            return all.into_iter().take(limit).collect();
         }
 
-        let mut scored: Vec<(u8, &WorkspaceEntry)> = self
+        let mut scored: Vec<(u8, bool, &WorkspaceEntry)> = self
             .entries
             .iter()
             .filter_map(|entry| {
                 let name_low = entry.name.to_lowercase();
                 let rel_low = entry.rel_path.to_lowercase();
-                if name_low == q || rel_low == q {
-                    Some((0, entry))
+                let rank = if name_low == q || rel_low == q {
+                    0
                 } else if name_low.starts_with(&q) {
-                    Some((1, entry))
+                    1
                 } else if rel_low.starts_with(&q) {
-                    Some((2, entry))
+                    2
                 } else if name_low.contains(&q) {
-                    Some((3, entry))
+                    3
                 } else if rel_low.contains(&q) {
-                    Some((4, entry))
+                    4
                 } else {
-                    None
-                }
+                    return None;
+                };
+                Some((rank, entry.is_recent, entry))
             })
             .collect();
 
-        scored.sort_by(|(sa, a), (sb, b)| {
-            sa.cmp(sb)
+        scored.sort_by(|(sa, ra, a), (sb, rb, b)| {
+            rb.cmp(ra)
+                .then_with(|| sa.cmp(sb))
                 .then_with(|| a.rel_path.len().cmp(&b.rel_path.len()))
                 .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
@@ -250,7 +262,7 @@ impl WorkspaceMentionIndex {
         scored
             .into_iter()
             .take(limit)
-            .map(|(_, e)| e.clone())
+            .map(|(_, _, e)| e.clone())
             .collect()
     }
 }
@@ -291,11 +303,27 @@ fn collect_recursive(
             .replace('\\', "/");
 
         let is_heavy = entry.is_dir && is_heavy_directory(&entry.name);
+        let is_recent = if !entry.is_dir {
+            std::fs::metadata(&entry.path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|mod_time| {
+                    std::time::SystemTime::now()
+                        .duration_since(mod_time)
+                        .ok()
+                })
+                .map(|dur| dur.as_secs() < 14400) // modifié au cours des 4 dernières heures
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
         out.push(WorkspaceEntry {
             name: entry.name,
             rel_path,
             full_path: entry.path.clone(),
             is_dir: entry.is_dir,
+            is_recent,
         });
 
         if entry.is_dir && !is_heavy {

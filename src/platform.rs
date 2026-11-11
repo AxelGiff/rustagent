@@ -392,3 +392,69 @@ pub fn cd_command(dir: &std::path::Path) -> String {
         format!("Set-Location \"{}\"\r\n", normalized)
     }
 }
+
+/// Recherche le binaire ou script CLI de VS Code (`code.cmd`, `code.exe`, ou `code`).
+pub fn find_vscode_command() -> Option<String> {
+    if cfg!(windows) {
+        let mut candidates = Vec::new();
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let p = std::path::PathBuf::from(&local_app_data)
+                .join(r"Programs\Microsoft VS Code\bin\code.cmd");
+            candidates.push(p);
+            let p_exe = std::path::PathBuf::from(&local_app_data)
+                .join(r"Programs\Microsoft VS Code\Code.exe");
+            candidates.push(p_exe);
+        }
+        if let Some(program_files) = std::env::var_os("ProgramFiles") {
+            candidates.push(
+                std::path::PathBuf::from(program_files)
+                    .join(r"Microsoft VS Code\bin\code.cmd"),
+            );
+        }
+        for c in candidates {
+            if c.is_file() {
+                return Some(c.to_string_lossy().to_string());
+            }
+        }
+        // Tentative via PATH standard
+        Some("code.cmd".to_string())
+    } else {
+        Some("code".to_string())
+    }
+}
+
+/// Ouvre un fichier (ou dossier) dans VS Code, éventuellement à une ligne précise (`code -g path:line`).
+pub fn open_in_vscode(path: &std::path::Path, line: Option<usize>) -> bool {
+    let Some(cmd) = find_vscode_command() else {
+        return false;
+    };
+    let mut command = std::process::Command::new(&cmd);
+    if let Some(l) = line {
+        command.arg("-g").arg(format!("{}:{}", path.display(), l));
+    } else {
+        command.arg(path);
+    }
+    command.spawn().is_ok()
+}
+
+/// Ouvre le comparateur de Diff natif de VS Code (`code --diff <ancien> <nouveau>`).
+/// Le contenu proposé par l'agent est écrit dans un fichier temporaire en lecture seule.
+pub fn diff_in_vscode(disk_path: &std::path::Path, proposed_content: &str) -> bool {
+    let Some(cmd) = find_vscode_command() else {
+        return false;
+    };
+    let file_name = disk_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let temp_diff_file = std::env::temp_dir().join(format!("rustagent_diff_{}", file_name));
+    if std::fs::write(&temp_diff_file, proposed_content).is_err() {
+        return false;
+    }
+    std::process::Command::new(&cmd)
+        .args(["--diff"])
+        .arg(disk_path)
+        .arg(&temp_diff_file)
+        .spawn()
+        .is_ok()
+}

@@ -66,7 +66,11 @@ fn app() -> impl IntoElement {
     let input_value = use_state(String::new);
     let terminal_handle = use_state(spawn_terminal);
 
-    let current_dir = use_state(|| std::env::current_dir().unwrap_or_default());
+    let current_dir = use_state(|| {
+        let d = std::env::current_dir().unwrap_or_default();
+        crate::session::set_active_project_root(Some(d.clone()));
+        d
+    });
     let expanded_dirs = use_state(std::collections::HashSet::<std::path::PathBuf>::new);
     let context_paths = use_state(Vec::<std::path::PathBuf>::new);
     let pending_diffs = use_state(Vec::<diff::PendingDiff>::new);
@@ -74,15 +78,19 @@ fn app() -> impl IntoElement {
     let inline_diff_idx = use_state(|| None::<usize>);
     let review_box_expanded = use_state(|| false);
     let split_diff_view = use_state(|| false);
+    let companion_mode = use_state(|| true);
     let chat_scroll = use_scroll_controller(|| ScrollConfig {
         default_vertical_position: ScrollPosition::End,
         ..Default::default()
     });
+    let user_scrolled_up = use_state(|| false);
     let center_view_mode = use_state(|| CenterViewMode::Editor);
     let is_generating = use_state(|| false);
     let is_spec_mode = use_state(|| false);
     let spec_selected_options = use_state(std::collections::HashMap::<String, String>::new);
     let spec_custom_input = use_state(String::new);
+    let audit_running = use_state(|| false);
+    let audit_result = use_state(|| None::<String>);
 
     // Command approval: the assistant's shell commands must be confirmed by the
     // user. The agent loop blocks asynchronously on a channel that the
@@ -163,6 +171,7 @@ fn app() -> impl IntoElement {
                 if let Some(chosen) = picked {
                     expanded_dirs.write().clear();
                     *current_dir.write() = chosen.clone();
+                    crate::session::set_active_project_root(Some(chosen.clone()));
                     if let Some(term) = terminal_opt {
                         let cmd = platform::cd_command(&chosen);
                         let _ = term.write(cmd.as_bytes());
@@ -271,36 +280,24 @@ fn app() -> impl IntoElement {
         editor,
         current_language,
         file_name,
+        user_scrolled_up,
     };
 
     let open_file = {
-        let editor = editor;
-        let current_language = current_language;
         let file_name = file_name;
-        let open_tabs = open_tabs;
-        let center_view_mode = center_view_mode;
         move |path: std::path::PathBuf| {
-            let mut center_view_mode = center_view_mode;
-            load_file_into_editor(
-                &path,
-                editor.into_writable(),
-                current_language.into_writable(),
-                file_name.into_writable(),
-                open_tabs.into_writable(),
-            );
-            *center_view_mode.write() = CenterViewMode::Editor;
+            let mut file_name = file_name;
+            *file_name.write() = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            crate::platform::open_in_vscode(&path, None);
         }
     };
 
     let send_text = {
-        let mut messages = messages;
-        let mut input_value = input_value;
-        let mut editor = editor;
-        let mut file_name = file_name;
-        let mut is_generating = is_generating;
-        let mut chat_scroll = chat_scroll;
-        let mut context_paths = context_paths;
+        let (messages, input_value, editor, file_name, is_generating, chat_scroll, context_paths, user_scrolled_up) =
+            (messages, input_value, editor, file_name, is_generating, chat_scroll, context_paths, user_scrolled_up);
         move |user_message: String| {
+            let (mut messages, mut input_value, mut editor, mut file_name, mut is_generating, mut chat_scroll, mut context_paths, mut user_scrolled_up) =
+                (messages, input_value, editor, file_name, is_generating, chat_scroll, context_paths, user_scrolled_up);
             if !should_send_message(&user_message) {
                 return;
             }
@@ -342,6 +339,7 @@ fn app() -> impl IntoElement {
                 role: Role::User,
                 content: display_user_msg,
             });
+            *user_scrolled_up.write() = false;
             chat_scroll.scroll_to(ScrollPosition::End, Direction::Vertical);
 
             let detected_language = SupportedLanguage::detect(&user_message);
@@ -375,17 +373,15 @@ fn app() -> impl IntoElement {
             {
                 expanded_dirs_stream.write().clear();
                 *current_dir_stream.write() = detected_proj.clone();
+                crate::session::set_active_project_root(Some(detected_proj.clone()));
                 if let Some(ref term) = terminal_for_sync {
                     let cmd = platform::cd_command(&detected_proj);
                     let _ = term.write(cmd.as_bytes());
                 }
             }
 
-            let mut pending_diffs_stream = pending_diffs;
-            let mut center_view_mode_stream = center_view_mode;
-            let mut messages_stream = messages;
-            let mut is_generating_stream = is_generating;
-            let mut chat_scroll_stream = chat_scroll;
+            let (mut pending_diffs_stream, mut center_view_mode_stream, mut messages_stream, mut is_generating_stream, mut chat_scroll_stream, mut user_scrolled_stream) =
+                (pending_diffs, center_view_mode, messages, is_generating, chat_scroll, user_scrolled_up);
             let spec_mode = *is_spec_mode.read();
 
             spawn(async move {
@@ -393,26 +389,26 @@ fn app() -> impl IntoElement {
                     role: Role::AI,
                     content: String::new(),
                 });
+                *user_scrolled_stream.write() = false;
                 chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
                 let ai_msg_idx = messages_stream.read().len() - 1;
 
-                let mut messages_for_chunk = messages_stream;
-                let mut pending_diffs_for_cb = pending_diffs_stream;
-                let mut center_view_for_cb = center_view_mode_stream;
-                let mut chat_scroll_for_chunk = chat_scroll_stream;
-                let mut chat_scroll_for_cb = chat_scroll_stream;
+                let (mut messages_for_chunk, mut pending_diffs_for_cb, mut center_view_for_cb, mut chat_scroll_for_cb, mut chat_scroll_for_chunk, user_scrolled_for_chunk, mut chunk_cnt) =
+                    (messages_stream, pending_diffs_stream, center_view_mode_stream, chat_scroll_stream, chat_scroll_stream, user_scrolled_stream, 0usize);
 
                 // Snapshot AVANT l'appel asynchrone : sinon le guard de lecture de
                 // `pending_diffs_stream` reste vivant pendant tout le `.await` et le
                 // callback `on_pending_diff` panique ("State already borrowed").
                 let pending_diffs_snapshot = pending_diffs_stream.read().clone();
 
+                crate::session::set_active_project_root(Some(root_snapshot.clone()));
                 let result = agent::run_agent_turn(
                     user_message,
                     spec_mode,
                     history_snapshot,
                     current_editor_code,
                     current_editor_file,
+                    root_snapshot,
                     pinned_snapshot,
                     pending_diffs_snapshot,
                     wants_code,
@@ -421,7 +417,10 @@ fn app() -> impl IntoElement {
                         if let Some(msg) = messages_for_chunk.write().get_mut(ai_msg_idx) {
                             msg.content.push_str(chunk);
                         }
-                        chat_scroll_for_chunk.scroll_to(ScrollPosition::End, Direction::Vertical);
+                        chunk_cnt += 1;
+                        if (chunk_cnt % 5 == 0 || chunk.contains('\n')) && !*user_scrolled_for_chunk.read() {
+                            chat_scroll_for_chunk.scroll_to(ScrollPosition::End, Direction::Vertical);
+                        }
                     },
                     |diff| {
                         let diff_path = std::path::PathBuf::from(&diff.path);
@@ -472,7 +471,9 @@ fn app() -> impl IntoElement {
                         }
                     }
                 }
-                chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
+                if !*user_scrolled_stream.read() {
+                    chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
+                }
             });
         }
     };
@@ -561,6 +562,9 @@ fn app() -> impl IntoElement {
             current_language.into_writable(),
             file_name.into_writable(),
             open_tabs.into_writable(),
+            current_dir.into(),
+            audit_running.into_writable(),
+            audit_result.into_writable(),
             pending_diffs
                 .read()
                 .iter()
@@ -574,6 +578,7 @@ fn app() -> impl IntoElement {
             },
             save_file,
             execute_code,
+            send_text.clone(),
             editor_a11y_id,
             c.clone(),
         )
@@ -583,7 +588,7 @@ fn app() -> impl IntoElement {
     let chat = chat_panel(
         messages.into(),
         input_value.into(),
-        is_generating.into(),
+        is_generating.into_writable(),
         is_spec_mode.into_writable(),
         spec_selected_options.into_writable(),
         spec_custom_input.into_writable(),
@@ -616,6 +621,7 @@ fn app() -> impl IntoElement {
         current_theme.into_writable(),
         theme.into_writable(),
         show_settings.into_writable(),
+        companion_mode.into_writable(),
         available_models.into_writable(),
         models_loading.into_writable(),
         settings_endpoint_input.into(),
@@ -626,7 +632,8 @@ fn app() -> impl IntoElement {
         c.clone(),
     );
 
-    let main_workspace = main_workspace_layout(file_tree, center_top_panel, terminal, chat);
+    let main_workspace =
+        main_workspace_layout(file_tree, center_top_panel, terminal, chat, *companion_mode.read());
 
     let mut root = rect()
         .expanded()
@@ -665,28 +672,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_message_is_not_sent() {
+    fn test_should_send_message() {
         assert!(!should_send_message(""));
-    }
-
-    #[test]
-    fn whitespace_only_message_is_not_sent() {
-        assert!(!should_send_message("   "));
-        assert!(!should_send_message("\t"));
-        assert!(!should_send_message("\n"));
-        assert!(!should_send_message(" \t \n "));
-    }
-
-    #[test]
-    fn non_empty_message_is_sent() {
-        assert!(should_send_message("hello"));
-        assert!(should_send_message(" write a function "));
-        assert!(should_send_message("clear editor"));
-        assert!(should_send_message("a"));
-    }
-
-    #[test]
-    fn message_with_leading_trailing_whitespace_is_sent() {
-        assert!(should_send_message("  hello  "));
+        for s in &["   ", "\t", "\n", " \t \n "] { assert!(!should_send_message(s)); }
+        for s in &["hello", " write a function ", "clear editor", "a", "  hello  "] { assert!(should_send_message(s)); }
     }
 }

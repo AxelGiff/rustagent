@@ -182,7 +182,7 @@ mod tests {
         let (cat, accumulated) = result.unwrap_err();
         assert_eq!(cat, ApiErrorCategory::Network);
         assert!(accumulated.starts_with("Part 1. "));
-        assert!(accumulated.contains("network error"));
+        assert!(accumulated.to_lowercase().contains("erreur réseau") || accumulated.to_lowercase().contains("network"));
         assert_eq!(chunks_received.len(), 2);
         assert_eq!(chunks_received[0], "Part 1. ");
     }

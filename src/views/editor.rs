@@ -1,12 +1,16 @@
-//! Code editor view panel component with multi-file tabs and close (`✕`) buttons.
+//! Code editor & Security Audit Cockpit view panel component.
+//!
+//! Provides multi-file tabs with close (`✕`) buttons, a 1-click `verify_project`
+//! compilation & audit dashboard, and direct bridges to VS Code.
 
 use crate::language::SupportedLanguage;
 use crate::views::ui::{self, Tone};
 use freya::code_editor::*;
 use freya::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Opens `path_str` from disk into `editor`, `current_language`, `file_name`, and `open_tabs`.
+#[allow(dead_code)]
 pub fn load_file_into_editor(
     path: &Path,
     mut editor: Writable<CodeEditorData>,
@@ -32,41 +36,88 @@ pub fn load_file_into_editor(
     }
 }
 
-/// Builds the code editor pane. When no file is opened (`file_name.is_empty()`),
-/// displays a styled RustAgent empty-state card indicating that no diff or file is active.
-#[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
+/// Builds the code editor or Security Audit Cockpit pane.
+#[allow(clippy::too_many_arguments)]
 pub fn code_editor_panel(
-    editor: Writable<CodeEditorData>,
-    current_language: Writable<SupportedLanguage>,
+    _editor: Writable<CodeEditorData>,
+    _current_language: Writable<SupportedLanguage>,
     file_name: Writable<String>,
-    open_tabs: Writable<Vec<String>>,
+    _open_tabs: Writable<Vec<String>>,
+    current_dir: Readable<PathBuf>,
+    audit_running: Writable<bool>,
+    audit_result: Writable<Option<String>>,
     has_diffs_count: usize,
     mut on_view_diff: impl FnMut() + 'static,
-    mut on_save: impl FnMut() + 'static,
-    mut on_execute: impl FnMut() + 'static,
-    a11y_id: AccessibilityId,
+    _on_save: impl FnMut() + 'static,
+    _on_execute: impl FnMut() + 'static,
+    on_quick_prompt: impl Fn(String) + Clone + 'static,
+    _a11y_id: AccessibilityId,
     c: ColorsSheet,
 ) -> impl IntoElement {
     let active_file = file_name.read().clone();
-    if active_file.trim().is_empty() {
+    let dir = current_dir.read().clone();
+
+    let _ = active_file;
+    let dir_display = dir.to_string_lossy().replace('\\', "/");
+    let plan_path = dir.join("plan.md");
+    let has_plan = plan_path.is_file();
+
+    let run_audit_verify = {
+            let mut audit_running = audit_running.clone();
+            let mut audit_result = audit_result.clone();
+            let dir_clone = dir.clone();
+            move |_| {
+                *audit_running.write() = true;
+                *audit_result.write() = None;
+                let dir_str = dir_clone.to_string_lossy().to_string();
+                let mut audit_running = audit_running.clone();
+                let mut audit_result = audit_result.clone();
+                spawn(async move {
+                    let report = crate::tools::run_verification(Some(&dir_str)).await;
+                    *audit_result.write() = Some(report);
+                    *audit_running.write() = false;
+                });
+            }
+        };
+
+        let dir_for_vscode = dir.clone();
+        let open_dir_in_vscode = move |_| {
+            crate::platform::open_in_vscode(&dir_for_vscode, None);
+        };
+
+        let plan_for_vscode = plan_path.clone();
+        let open_plan_in_vscode = move |_| {
+            crate::platform::open_in_vscode(&plan_for_vscode, None);
+        };
+
+        let on_prompt_audit = on_quick_prompt.clone();
+        let on_prompt_fix = on_quick_prompt.clone();
+        let on_prompt_refactor = on_quick_prompt.clone();
+        let dir_display_audit = dir_display.clone();
+        let dir_display_refactor = dir_display.clone();
+
         return rect()
             .expanded()
             .content(Content::Flex)
             .background(c.background)
             .child(
-                ui::panel_header(&c, 38.)
+                ui::panel_header(&c, 44.)
                     .child(
                         ui::row(8.)
                             .width(Size::flex(1.))
-                            .child(
-                                ui::subtitle("⚡ RustAgent — Revue & Éditeur", &c)
-                                    .font_weight(FontWeight::BOLD),
-                            ),
+                            .child(ui::title("🛡️ Cockpit Architecte & Auditeur Security by Design", &c).font_size(14.))
+                            .child(ui::pill("Albert API", Tone::Primary, &c)),
                     )
+                    .child(ui::btn_sm(
+                        "💙 Ouvrir dans VS Code",
+                        Tone::Primary,
+                        &c,
+                        open_dir_in_vscode,
+                    ))
                     .maybe_child((has_diffs_count > 0).then(|| {
                         ui::btn_sm(
-                            format!("📂 Voir les fichiers modifiés ({})", has_diffs_count),
-                            Tone::Subtle,
+                            format!("📂 Voir diffs ({})", has_diffs_count),
+                            Tone::Success,
                             &c,
                             move |_| on_view_diff(),
                         )
@@ -76,227 +127,151 @@ pub fn code_editor_panel(
                 rect()
                     .width(Size::fill())
                     .height(Size::flex(1.))
-                    .center()
-                    .padding(24.)
+                    .padding(16.)
                     .child(
-                        ui::card(&c)
-                            .width(Size::px(500.))
-                            .padding(Gaps::new(28., 32., 28., 32.))
-                            .corner_radius(16.)
-                            .cross_align(Alignment::Center)
-                            .spacing(14.)
-                            .child(ui::pill(
-                                "🛡️ RUSTAGENT · ALBERT API WORKSPACE",
-                                Tone::Success,
-                                &c,
-                            ))
-                            .child(
-                                label()
-                                    .width(Size::fill())
-                                    .text("Pas de fichiers en diff pour le moment")
-                                    .color(c.text_primary)
-                                    .font_size(18.)
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_align(TextAlign::Center),
-                            )
-                            .child(
-                                ui::subtitle(
-                                    "Envoyez une instruction à l'agent dans la conversation à droite pour générer ou modifier du code avec revue de diff ligne par ligne, ou ouvrez un fichier depuis l'explorateur à gauche.",
-                                    &c,
-                                )
+                        ScrollView::new().child(
+                            ui::col(14.)
                                 .width(Size::fill())
-                                .text_align(TextAlign::Center),
-                            )
-                            .child(
-                                ui::row(8.)
-                                    .padding(Gaps::new(6., 0., 0., 0.))
-                                    .child(ui::pill("⚡ Quick Edit", Tone::Subtle, &c))
-                                    .child(ui::pill("🛡️ Mode Spec", Tone::Subtle, &c))
-                                    .child(ui::pill("📝 Revue Diff", Tone::Subtle, &c)),
-                            ),
+                                .child(
+                                    // Card 1: 🔎 Auto-Vérification de compilation en 1 clic
+                                    ui::card(&c)
+                                        .child(
+                                            ui::row_fill(8.)
+                                                .child(
+                                                    ui::col(2.)
+                                                        .width(Size::flex(1.))
+                                                        .child(ui::title("🔎 Audit & Compilation du projet", &c))
+                                                        .child(ui::subtitle(
+                                                            format!("Dossier cible : {} (testé sur une copie temporaire isolée)", dir_display),
+                                                            &c,
+                                                        )),
+                                                )
+                                                .child(ui::btn_sm(
+                                                    if *audit_running.read() {
+                                                        "⏳ Compilation en cours..."
+                                                    } else {
+                                                        "▶ Lancer l'Audit de Compilation"
+                                                    },
+                                                    if *audit_running.read() { Tone::Neutral } else { Tone::Success },
+                                                    &c,
+                                                    run_audit_verify,
+                                                )),
+                                        )
+                                        .maybe_child(audit_result.read().as_ref().map(|rep| {
+                                            let is_success = rep.contains("Vérification OK ✅");
+                                            let err_report = rep.clone();
+                                            let on_send_fix = on_prompt_fix.clone();
+
+                                            ui::col(8.)
+                                                .width(Size::fill())
+                                                .padding(Gaps::new(8., 10., 8., 10.))
+                                                .background(c.surface_secondary)
+                                                .corner_radius(6.)
+                                                .border(Border::new().fill(if is_success { Color::from_rgb(16, 185, 129) } else { Color::from_rgb(239, 68, 68) }).width(1.))
+                                                .child(
+                                                    ui::row_fill(6.)
+                                                        .child(ui::tag(if is_success { "SUCCÈS ✅" } else { "ERREURS DÉTECTÉES ❌" }, if is_success { Tone::Success } else { Tone::Danger }, &c))
+                                                        .maybe_child((!is_success).then(|| {
+                                                            ui::btn_sm("⚡ Faire corriger par l'agent", Tone::Danger, &c, move |_| {
+                                                                on_send_fix(format!("Corrige les erreurs de compilation suivantes dans le projet :\n```\n{}\n```", err_report));
+                                                            })
+                                                        })),
+                                                )
+                                                .child(
+                                                    rect()
+                                                        .width(Size::fill())
+                                                        .height(Size::px(140.))
+                                                        .background(c.surface_primary)
+                                                        .corner_radius(5.)
+                                                        .padding(6.)
+                                                        .child(
+                                                            ScrollView::new().child(
+                                                                ui::mono(rep.clone(), 11., if is_success { Color::from_rgb(134, 239, 172) } else { Color::from_rgb(252, 165, 165) })
+                                                            )
+                                                        )
+                                                )
+                                        })),
+                                )
+                                .child(
+                                    // Card 2: 🛡️ Spécifications & Architecture (plan.md)
+                                    ui::card(&c)
+                                        .child(
+                                            ui::row_fill(8.)
+                                                .child(
+                                                    ui::col(2.)
+                                                        .width(Size::flex(1.))
+                                                        .child(ui::title("🛡️ Cadrage d'Architecture & Security by Design (`plan.md`)", &c))
+                                                        .child(ui::subtitle(
+                                                            if has_plan {
+                                                                "Un plan de spécification et d'architecture `plan.md` est actif et protégé par le `.gitignore`."
+                                                            } else {
+                                                                "Aucun plan d'architecture formalisé. Utilisez le 🛡️ Mode Spec dans le chat pour cadrer vos fonctionnalités."
+                                                            },
+                                                            &c,
+                                                        )),
+                                                )
+                                                .maybe_child(has_plan.then(|| {
+                                                    ui::btn_sm("📄 Ouvrir plan.md dans VS Code", Tone::Subtle, &c, open_plan_in_vscode)
+                                                })),
+                                        )
+                                        .child(
+                                            ui::row(6.)
+                                                .child(ui::pill("Validation stricte des entrées", Tone::Subtle, &c))
+                                                .child(ui::pill("Moindre privilège", Tone::Subtle, &c))
+                                                .child(ui::pill("Chiffrement fort & Zéro fuite de données", Tone::Subtle, &c)),
+                                        ),
+                                )
+                                .child(
+                                    // Card 3: 🚀 Raccourcis rapides d'Architecture & d'Audit
+                                    ui::card(&c)
+                                        .child(ui::title("🚀 Actions Rapides d'Architecture & d'Audit", &c))
+                                        .child(ui::subtitle(
+                                            "Cliquez sur une action ci-dessous pour lancer l'analyse autonome par Albert API :",
+                                            &c,
+                                        ))
+                                        .child(
+                                            ui::row_fill(8.)
+                                                .child(ui::btn_sm(
+                                                    "🛡️ Auditer la sécurité (OWASP)",
+                                                    Tone::Primary,
+                                                    &c,
+                                                    move |_| {
+                                                        on_prompt_audit(format!(
+                                                            "Audite la sécurité du projet situé dans `{}` selon les principes Security by Design (OWASP, validation des entrées, contrôle des erreurs, gestion des secrets). Rédige ton rapport d'audit complet directement dans la conversation (sans créer de fichier sur le disque).",
+                                                            dir_display_audit
+                                                        ));
+                                                    },
+                                                ))
+                                                .child(ui::btn_sm(
+                                                    "🧹 Proposer un refactoring modulaire",
+                                                    Tone::Neutral,
+                                                    &c,
+                                                    move |_| {
+                                                        on_prompt_refactor(format!(
+                                                            "Analyse la structure des fichiers du projet situé dans `{}` et propose un refactoring propre, modulaire et typé sans casser l'existant.",
+                                                            dir_display_refactor
+                                                        ));
+                                                    },
+                                                )),
+                                        ),
+                                )
+                                .child(
+                                    // Card 4: 💙 Guide de symbiose avec VS Code
+                                    ui::accent_card(&c, c.primary)
+                                        .child(ui::title("💙 Travailler en symbiose avec VS Code", &c))
+                                        .child(ui::subtitle(
+                                            "VS Code reste votre éditeur principal. RustAgent est votre sas de sécurité hermétique : l'agent prépare le code, teste la compilation en tâche de fond, et n'écrit sur votre disque que les blocs de diff que vous avez validés avec ✓.",
+                                            &c,
+                                        ))
+                                        .child(ui::muted(
+                                            "Astuce : Cliquez sur n'importe quel fichier dans l'explorateur pour l'ouvrir directement dans VS Code ! Tapez `@` dans le chat pour cibler vos fichiers (les fichiers récemment enregistrés avec Ctrl+S dans VS Code apparaissent tout en haut du menu).",
+                                            &c,
+                                        )),
+                                ),
+                        ),
                     ),
             )
-            .into_element();
-    }
-
-    let mut tabs_list = open_tabs.read().clone();
-    if !tabs_list.contains(&active_file) {
-        tabs_list.push(active_file.clone());
-    }
-
-    let tab_elements = tabs_list.into_iter().map({
-        let active_file = active_file.clone();
-        let editor = editor.clone();
-        let current_language = current_language.clone();
-        let file_name = file_name.clone();
-        let open_tabs = open_tabs.clone();
-        let c = c.clone();
-        move |tab_path| {
-            let is_active = tab_path == active_file;
-            let short_name = Path::new(&tab_path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| tab_path.clone());
-            let tab_key = format!("editor_tab_{}", tab_path);
-
-            let select_tab = {
-                let tab_path = tab_path.clone();
-                let editor = editor.clone();
-                let current_language = current_language.clone();
-                let file_name = file_name.clone();
-                let open_tabs = open_tabs.clone();
-                move |_| {
-                    load_file_into_editor(
-                        Path::new(&tab_path),
-                        editor.clone(),
-                        current_language.clone(),
-                        file_name.clone(),
-                        open_tabs.clone(),
-                    );
-                }
-            };
-
-            let close_tab = {
-                let tab_path = tab_path.clone();
-                let mut editor = editor.clone();
-                let mut current_language = current_language.clone();
-                let mut file_name = file_name.clone();
-                let mut open_tabs = open_tabs.clone();
-                move |_| {
-                    let next_tab = {
-                        let mut tabs = open_tabs.write();
-                        tabs.retain(|t| t != &tab_path);
-                        tabs.last().cloned()
-                    };
-                    let currently_open = file_name.read().clone();
-                    if currently_open == tab_path {
-                        if let Some(next) = next_tab {
-                            load_file_into_editor(
-                                Path::new(&next),
-                                editor.clone(),
-                                current_language.clone(),
-                                file_name.clone(),
-                                open_tabs.clone(),
-                            );
-                        } else {
-                            *file_name.write() = String::new();
-                            *editor.write() = create_editor_data("", None);
-                            let _ = &mut current_language;
-                        }
-                    }
-                }
-            };
-
-            rect()
-                .key(&tab_key)
-                .padding(Gaps::new(4., 8., 4., 10.))
-                .background(if is_active {
-                    c.surface_tertiary
-                } else {
-                    c.surface_secondary
-                })
-                .border(
-                    Border::new()
-                        .fill(if is_active { c.primary } else { c.border })
-                        .width(1.),
-                )
-                .corner_radius(6.)
-                .horizontal()
-                .cross_align(Alignment::Center)
-                .spacing(6.)
-                .child(
-                    rect()
-                        .horizontal()
-                        .cross_align(Alignment::Center)
-                        .spacing(5.)
-                        .on_press(select_tab)
-                        .child(
-                            label()
-                                .text(format!("📄 {}", short_name))
-                                .color(if is_active {
-                                    c.text_primary
-                                } else {
-                                    c.text_secondary
-                                })
-                                .font_size(12.)
-                                .font_weight(if is_active {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                }),
-                        ),
-                )
-                .child(
-                    rect()
-                        .width(Size::px(18.))
-                        .height(Size::px(18.))
-                        .corner_radius(4.)
-                        .background(if is_active {
-                            c.surface_secondary
-                        } else {
-                            Color::TRANSPARENT
-                        })
-                        .center()
-                        .on_press(close_tab)
-                        .child(
-                            label()
-                                .text("✕")
-                                .color(c.text_secondary)
-                                .font_size(10.5)
-                                .font_weight(FontWeight::BOLD),
-                        ),
-                )
-                .into_element()
-        }
-    });
-
-    rect()
-        .expanded()
-        .content(Content::Flex)
-        .background(c.background)
-        .child(
-            ui::panel_header(&c, 42.)
-                .child(
-                    ScrollView::new()
-                        .direction(Direction::Horizontal)
-                        .width(Size::flex(1.))
-                        .height(Size::px(32.))
-                        .child(ui::row(6.).children(tab_elements)),
-                )
-                .child(
-                    ui::row(6.)
-                        .maybe_child((has_diffs_count > 0).then(|| {
-                            ui::btn_sm(
-                                format!("📂 Diffs ({})", has_diffs_count),
-                                Tone::Subtle,
-                                &c,
-                                move |_| on_view_diff(),
-                            )
-                        }))
-                        .child(ui::btn_sm("💾 Sauvegarder", Tone::Neutral, &c, move |_| {
-                            on_save()
-                        }))
-                        .child(ui::btn_sm("▶ Exécuter", Tone::Primary, &c, move |_| {
-                            on_execute()
-                        })),
-                ),
-        )
-        .child(
-            rect()
-                .width(Size::fill())
-                .height(Size::flex(1.))
-                .padding(Gaps::new(6., 6., 6., 0.))
-                .child(
-                    CodeEditor::new(editor, a11y_id)
-                        .background(c.surface_secondary)
-                        .line_selected_background(Color::from_argb(20, 122, 162, 247))
-                        .gutter_selected(c.primary)
-                        .gutter_unselected(c.text_placeholder)
-                        .cursor(c.text_primary)
-                        .highlight(Color::from_argb(65, 122, 162, 247)),
-                ),
-        )
-        .into_element()
+            .into_element()
 }
 
 /// Helper function to create a clean CodeEditorData without stale AST nodes from previous files.

@@ -24,6 +24,7 @@ pub struct DiffReviewState {
     pub editor: State<CodeEditorData>,
     pub current_language: State<SupportedLanguage>,
     pub file_name: State<String>,
+    pub user_scrolled_up: State<bool>,
 }
 
 impl DiffReviewState {
@@ -417,16 +418,18 @@ fn render_split_row(row: &diff::SplitDiffRow, colors: &ColorsSheet) -> Element {
         .into_element()
 }
 
-/// Renders the interactive Hunk header bar (`@@ -old +new @@ · Bloc #N` + `✓ Accepter ce bloc` / `✗ Rejeter ce bloc`).
+/// Renders the interactive Hunk header bar (`@@ -old +new @@ · Bloc #N` + `✓ Accepter ce bloc` / `✗ Rejeter ce bloc` + `💙 Ligne X`).
 fn render_hunk_header(
     hunk: &diff::DiffHunk,
     total_hunks: usize,
     diff_idx: usize,
+    _diff_path: &str,
     is_pending: bool,
     diff_review: DiffReviewState,
     colors: &ColorsSheet,
 ) -> Element {
     let hunk_idx = hunk.index;
+
     rect()
         .width(Size::fill())
         .padding(Gaps::new(5., 10., 5., 10.))
@@ -480,6 +483,7 @@ fn build_unified_diff_elements(
     diff_lines: &[diff::DiffLine],
     max_rows: Option<usize>,
     diff_idx: usize,
+    diff_path: &str,
     is_pending: bool,
     enable_hunk_headers: bool,
     diff_review: DiffReviewState,
@@ -525,6 +529,7 @@ fn build_unified_diff_elements(
                 hunk,
                 total_hunks,
                 diff_idx,
+                diff_path,
                 is_pending,
                 diff_review,
                 colors,
@@ -579,6 +584,7 @@ fn build_unified_diff_elements(
 fn build_split_diff_elements(
     diff_lines: &[diff::DiffLine],
     diff_idx: usize,
+    diff_path: &str,
     is_pending: bool,
     diff_review: DiffReviewState,
     colors: &ColorsSheet,
@@ -610,6 +616,7 @@ fn build_split_diff_elements(
             hunk,
             total_hunks,
             diff_idx,
+            diff_path,
             is_pending,
             diff_review,
             colors,
@@ -725,12 +732,20 @@ pub fn diff_viewer_panel(
     );
 
     let line_elements = if is_split {
-        build_split_diff_elements(&diff.diff_lines, active_idx, is_pending, diff_review, &colors)
+        build_split_diff_elements(
+            &diff.diff_lines,
+            active_idx,
+            &diff_path,
+            is_pending,
+            diff_review,
+            &colors,
+        )
     } else {
         build_unified_diff_elements(
             &diff.diff_lines,
             None,
             active_idx,
+            &diff_path,
             is_pending,
             true,
             diff_review,
@@ -738,6 +753,8 @@ pub fn diff_viewer_panel(
         )
     };
     let mut center_mode_back = diff_review.center_view_mode;
+    let vscode_diff_path = diff_path.clone();
+    let vscode_new_content = diff.new_content.clone();
 
     rect()
         .expanded()
@@ -756,6 +773,17 @@ pub fn diff_viewer_panel(
                 .child(
                     ui::row(6.)
                         .child(ui::btn_sm(
+                            "🔍 Diff VS Code",
+                            Tone::Primary,
+                            &colors,
+                            move |_| {
+                                crate::platform::diff_in_vscode(
+                                    std::path::Path::new(&vscode_diff_path),
+                                    &vscode_new_content,
+                                );
+                            },
+                        ))
+                        .child(ui::btn_sm(
                             if is_split {
                                 "☰ Vue unifiée"
                             } else {
@@ -766,7 +794,7 @@ pub fn diff_viewer_panel(
                             move |_| diff_review.toggle_split_view(),
                         ))
                         .child(ui::btn_sm(
-                            "← Retour Éditeur",
+                            "← Retour Dashboard",
                             Tone::Neutral,
                             &colors,
                             move |_| {
@@ -890,6 +918,7 @@ pub fn changed_files_review_box(
                         &item.diff_lines,
                         Some(80),
                         idx,
+                        &item.path,
                         is_pending,
                         true,
                         diff_review,

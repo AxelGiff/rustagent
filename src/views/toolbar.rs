@@ -12,6 +12,7 @@ pub fn app_toolbar(
     current_theme: Writable<ThemePreset>,
     theme_state: Writable<Theme>,
     show_settings: Writable<bool>,
+    companion_mode: Writable<bool>,
     available_models: Writable<Vec<String>>,
     models_loading: Writable<bool>,
     _settings_endpoint_input: Readable<String>,
@@ -42,11 +43,22 @@ pub fn app_toolbar(
         }
     });
 
+    let is_comp = *companion_mode.read();
+    let mut comp_toggle = companion_mode;
+
     ui::panel_header(&c, 48.)
         .child(
             ui::row(8.)
                 .child(ui::title("⚡ RustAgent", &c).font_size(15.))
                 .child(ui::pill("Albert API", Tone::Primary, &c))
+                .child(ui::btn_sm(
+                    if is_comp { "🪟 Mode Compagnon VS Code" } else { "💻 Mode IDE Classique" },
+                    if is_comp { Tone::Primary } else { Tone::Subtle },
+                    &c,
+                    move |_| {
+                        *comp_toggle.write() = !is_comp;
+                    },
+                ))
                 .child(ui::btn_sm(
                     "📂 Ouvrir un projet",
                     Tone::Subtle,

@@ -24,6 +24,10 @@ pub struct TurnIntent {
     /// creating a new project). Exploration tools are kept available and the
     /// read budget is widened so the model can actually see the code it edits.
     pub modification_intent: bool,
+    /// The user specifically asks for an audit, review or inspection (OWASP, security, etc.).
+    /// Mutating tools (`write_file`, `edit_file`) are disabled so the audit is answered directly
+    /// in the chat without modifying or creating files on disk.
+    pub audit_intent: bool,
 }
 
 /// Extract the function name from a tool definition JSON value.
@@ -100,12 +104,46 @@ pub fn analyze_intent(
     .iter()
     .any(|k| lower_prompt.contains(k));
 
+    let is_explicit_audit = [
+        "audit",
+        "auditer",
+        "revue",
+        "analyser",
+        "analyse",
+        "inspecter",
+        "inspection",
+        "owasp",
+        "security by design",
+        "vulnérabilité",
+        "vulnerabilite",
+        "faille",
+    ]
+    .iter()
+    .any(|k| lower_prompt.contains(k));
+
+    let has_write_verb = [
+        "corrige", "corriger", "modifie", "modifier", "créer", "creer", "ajoute", "ajouter",
+        "implémente", "implemente",
+    ]
+    .iter()
+    .any(|k| {
+        if lower_prompt.contains(&format!("sans {}", k))
+            || lower_prompt.contains(&format!("sans de {}", k))
+        {
+            return false;
+        }
+        lower_prompt.contains(k)
+    });
+
+    let audit_intent = is_explicit_audit && !has_write_verb;
+
     TurnIntent {
         specs_already_answered,
         project_preloaded,
         wants_terminal_cmd,
         mentions_existing_folder,
         modification_intent,
+        audit_intent,
     }
 }
 
@@ -114,6 +152,9 @@ pub fn select_initial_tools(all: Vec<Value>, intent: &TurnIntent, spec_mode: boo
     all.into_iter()
         .filter(|t| {
             let name = tool_name(t);
+            if intent.audit_intent && matches!(name, "write_file" | "edit_file" | "write_plan") {
+                return false;
+            }
             if (!spec_mode || intent.specs_already_answered) && name == "ask_spec_questions" {
                 return false;
             }
@@ -143,6 +184,13 @@ pub fn active_tools_for_iteration(
 ) -> Option<Vec<Value>> {
     if !allow_tools {
         return None;
+    }
+    let is_audit = tools_payload.iter().all(|t| {
+        let n = tool_name(t);
+        n != "write_file" && n != "edit_file"
+    });
+    if is_audit {
+        return Some(tools_payload.to_vec());
     }
     if consecutive_read_turns >= max_read_turns || total_read_calls >= max_total_read_calls {
         Some(

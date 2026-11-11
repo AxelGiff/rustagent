@@ -49,6 +49,7 @@ pub struct AgentSession {
     approval_channel: watch::Sender<Option<PendingCommand>>,
     staging: Mutex<BTreeMap<String, String>>,
     workspaces: Mutex<BTreeMap<String, PathBuf>>,
+    project_root: Mutex<Option<PathBuf>>,
 }
 
 impl Default for AgentSession {
@@ -71,6 +72,7 @@ impl AgentSession {
             approval_channel: watch::channel(None).0,
             staging: Mutex::new(BTreeMap::new()),
             workspaces: Mutex::new(BTreeMap::new()),
+            project_root: Mutex::new(None),
         }
     }
 
@@ -241,6 +243,30 @@ impl AgentSession {
         guard.insert(project_root.to_string(), root.clone());
         Ok(root)
     }
+
+    // -- Active project root -----------------------------------------------
+
+    /// Sets the active workspace / project root folder currently open in the UI.
+    pub fn set_project_root(&self, root: Option<PathBuf>) {
+        if let Ok(mut guard) = self.project_root.lock() {
+            *guard = root;
+        }
+    }
+
+    /// Gets the active workspace / project root folder currently open in the UI.
+    pub fn project_root(&self) -> Option<PathBuf> {
+        self.project_root.lock().ok().and_then(|g| g.clone())
+    }
+}
+
+/// Sets the process-wide active workspace / project root.
+pub fn set_active_project_root(root: Option<PathBuf>) {
+    default_session().set_project_root(root);
+}
+
+/// Gets the process-wide active workspace / project root.
+pub fn active_project_root() -> Option<PathBuf> {
+    default_session().project_root()
 }
 
 /// The process-wide session used by the running application.

@@ -187,10 +187,10 @@ where
 
     // Leave plenty of room for the agent to list directories, search files, and read
     // existing code whether modifying or adding new components (e.g. creating a controller).
-    let editing = intent.modification_intent;
+    let editing = intent.modification_intent || intent.audit_intent;
     let max_read_turns: usize = if editing { 10 } else { 6 };
-    let max_read_calls_per_turn: usize = if editing { 10 } else { 6 };
-    let max_total_read_calls: usize = if editing { 25 } else { 15 };
+    let max_read_calls_per_turn: usize = if editing { 12 } else { 6 };
+    let max_total_read_calls: usize = if intent.audit_intent { 30 } else if editing { 25 } else { 15 };
     // A feature may need many read/edit/verify cycles: keep a generous budget.
     let max_agent_iterations: usize = if editing { 30 } else { 25 };
 
@@ -264,7 +264,19 @@ where
                 req_builder = req_builder.bearer_auth(api_key.trim());
             }
             let send_fut = req_builder.json(&req).send();
-            let sent = tokio::time::timeout(Duration::from_secs(60), send_fut).await;
+            let sent = tokio::select! {
+                _ = async {
+                    loop {
+                        if is_cancel_requested() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                    }
+                } => {
+                    break None;
+                }
+                res = tokio::time::timeout(Duration::from_secs(60), send_fut) => res,
+            };
             match sent {
                 Ok(Ok(r)) if r.status().is_success() => break Some(r),
                 Ok(Ok(r)) => {
@@ -357,28 +369,43 @@ where
         let mut byte_buffer: Vec<u8> = Vec::new();
         let mut acc = DeltaAccumulator::new();
 
-        loop {
+        'stream_loop: loop {
             if is_cancel_requested() {
                 accumulated_content.push_str(acc.clean_content());
                 return Ok(cancelled_summary(&accumulated_content));
             }
-            let next = match tokio::time::timeout(Duration::from_secs(30), stream.next()).await {
-                Ok(n) => n,
-                Err(_) => {
-                    if !accumulated_content.trim().is_empty() || acc.has_tool_calls() {
-                        break;
+            let next = tokio::select! {
+                _ = async {
+                    loop {
+                        if is_cancel_requested() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(80)).await;
                     }
-                    return Err(
-                        "Le modèle n'a rien renvoyé depuis 30 s (timeout du flux).".to_string()
-                    );
+                } => {
+                    accumulated_content.push_str(acc.clean_content());
+                    return Ok(cancelled_summary(&accumulated_content));
+                }
+                chunk = tokio::time::timeout(Duration::from_secs(30), stream.next()) => {
+                    match chunk {
+                        Ok(n) => n,
+                        Err(_) => {
+                            if !accumulated_content.trim().is_empty() || acc.has_tool_calls() {
+                                break 'stream_loop;
+                            }
+                            return Err(
+                                "Le modèle n'a rien renvoyé depuis 30 s (timeout du flux).".to_string()
+                            );
+                        }
+                    }
                 }
             };
-            let Some(chunk_res) = next else { break };
+            let Some(chunk_res) = next else { break 'stream_loop; };
             let bytes = match chunk_res {
                 Ok(b) => b,
                 Err(e) => {
                     if !accumulated_content.trim().is_empty() || acc.has_tool_calls() {
-                        break;
+                        break 'stream_loop;
                     }
                     return Err(e.to_string());
                 }
@@ -408,7 +435,7 @@ where
                 if let Some(rest) = line.strip_prefix("data: ") {
                     let data = rest.trim();
                     if data == "[DONE]" {
-                        break;
+                        break 'stream_loop;
                     }
                     match acc.process_data(data) {
                         Ok(pieces) => {
@@ -494,15 +521,29 @@ where
                 );
                 let is_list_call = call.function.name == "list_directory";
 
+                if intent.audit_intent && matches!(call.function.name.as_str(), "write_file" | "edit_file" | "write_plan") {
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some("⚠️ MODE AUDIT ACTIF (Lecture seule) : Tu es en mode audit. Tu ne dois créer ni modifier AUCUN fichier sur le disque ni dans plan.md. Rédige ton rapport d'audit directement en Markdown dans ta réponse pour l'utilisateur dans la conversation.".to_string()),
+                        tool_calls: None,
+                        tool_call_id: Some(call.id.clone()),
+                        name: Some(call.function.name.clone()),
+                    });
+                    continue;
+                }
+
                 if is_explore_call
                     && (read_calls_this_turn >= max_read_calls_per_turn
                         || total_read_calls >= max_total_read_calls)
                 {
+                    let warning = if intent.audit_intent {
+                        format!("⚠️ BUDGET D'EXPLORATION ATTEINT ({} lectures max) : Tu as suffisamment exploré les fichiers. Rédige MAINTENANT ton rapport d'audit complet en Markdown directement dans ta réponse pour l'utilisateur dans la conversation (ne crée aucun fichier sur le disque).", max_total_read_calls)
+                    } else {
+                        format!("⚠️ BUDGET D'EXPLORATION ATTEINT ({} lectures max) : N'appelle plus d'outils de lecture/recherche/commande. Passe MAINTENANT à l'écriture (`edit_file` pour une modification ciblée, `write_file` pour un nouveau fichier) ou à `verify_project`.", max_total_read_calls)
+                    };
                     messages.push(ChatMessage {
                         role: "tool".to_string(),
-                        content: Some(
-                            format!("⚠️ BUDGET D'EXPLORATION ATTEINT ({} lectures max) : N'appelle plus d'outils de lecture/recherche/commande. Passe MAINTENANT à l'écriture (`edit_file` pour une modification ciblée, `write_file` pour un nouveau fichier) ou à `verify_project`.", max_total_read_calls),
-                        ),
+                        content: Some(warning),
                         tool_calls: None,
                         tool_call_id: Some(call.id.clone()),
                         name: Some(call.function.name.clone()),
@@ -603,6 +644,9 @@ where
                     if !extracted.is_empty() {
                         let mut batch_outputs = Vec::new();
                         for (raw_p, code_content) in extracted {
+                            if is_cancel_requested() {
+                                return Ok(cancelled_summary(&accumulated_content));
+                            }
                             if code_content.trim() == "[Contenu déjà fourni au tour précédent]"
                                 || code_content.trim().starts_with("[Contenu déjà fourni")
                             {
@@ -715,6 +759,9 @@ where
                 } else {
                     crate::tools::execute_native_tool(&call.function.name, args).await
                 };
+                if is_cancel_requested() {
+                    return Ok(cancelled_summary(&accumulated_content));
+                }
                 let elapsed_ms = started.elapsed().as_millis();
                 let failed = tool_result.content.starts_with("Erreur");
                 if is_explore_call {
@@ -834,7 +881,11 @@ where
                         || total_read_calls >= max_total_read_calls)
                     && is_explore_call
                 {
-                    if spec_mode && !intent.specs_already_answered {
+                    if intent.audit_intent {
+                        content_to_send.push_str(
+                            "\n\n⚠️ INSTRUCTION CRITIQUE D'AUDIT : Tu as terminé l'exploration. Rédige MAINTENANT ton rapport d'audit complet directement dans ta réponse pour l'utilisateur dans la conversation (ne crée AUCUN fichier sur le disque).",
+                        );
+                    } else if spec_mode && !intent.specs_already_answered {
                         content_to_send.push_str(
                             "\n\n⚠️ ACTION OBLIGATOIRE AU PROCHAIN TOUR : Si des choix manquent, appelle `ask_spec_questions` (1 à 3 questions max). Sinon, appelle `write_file(path, content)` (un fichier par appel) ou `edit_file` !",
                         );

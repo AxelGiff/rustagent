@@ -2,26 +2,41 @@
 
 use freya::prelude::*;
 
-/// Builds the 3-column resizable main workspace layout.
+/// Builds the resizable workspace layout. When `companion_mode` is active,
+/// hides the terminal panel to give full vertical space to the Diff Review & Audit Cockpit.
 pub fn main_workspace_layout(
     file_tree: impl IntoElement,
     center_panel: impl IntoElement,
     terminal: impl IntoElement,
     chat: impl IntoElement,
+    companion_mode: bool,
 ) -> impl IntoElement {
-    ResizableContainer::new()
-        .direction(Direction::Horizontal)
-        .panel(ResizablePanel::new(PanelSize::percent(18.)).child(file_tree))
-        .panel(
-            ResizablePanel::new(PanelSize::percent(52.)).child(
-                ResizableContainer::new()
-                    .direction(Direction::Vertical)
-                    .panel(ResizablePanel::new(PanelSize::percent(55.)).child(center_panel))
-                    .panel(ResizablePanel::new(PanelSize::percent(45.)).child(terminal)),
-            ),
-        )
-        .panel(
-            ResizablePanel::new(PanelSize::percent(30.))
-                .child(rect().expanded().content(Content::Flex).child(chat)),
-        )
+    if companion_mode {
+        ResizableContainer::new()
+            .direction(Direction::Horizontal)
+            .panel(ResizablePanel::new(PanelSize::percent(22.)).child(file_tree))
+            .panel(ResizablePanel::new(PanelSize::percent(46.)).child(center_panel))
+            .panel(
+                ResizablePanel::new(PanelSize::percent(32.))
+                    .child(rect().expanded().content(Content::Flex).child(chat)),
+            )
+            .into_element()
+    } else {
+        ResizableContainer::new()
+            .direction(Direction::Horizontal)
+            .panel(ResizablePanel::new(PanelSize::percent(18.)).child(file_tree))
+            .panel(
+                ResizablePanel::new(PanelSize::percent(52.)).child(
+                    ResizableContainer::new()
+                        .direction(Direction::Vertical)
+                        .panel(ResizablePanel::new(PanelSize::percent(55.)).child(center_panel))
+                        .panel(ResizablePanel::new(PanelSize::percent(45.)).child(terminal)),
+                ),
+            )
+            .panel(
+                ResizablePanel::new(PanelSize::percent(30.))
+                    .child(rect().expanded().content(Content::Flex).child(chat)),
+            )
+            .into_element()
+    }
 }

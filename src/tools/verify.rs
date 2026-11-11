@@ -115,6 +115,11 @@ where
     let mut report = String::new();
     let mut all_ok = true;
     for cmd in &commands {
+        if crate::api::is_cancel_requested() {
+            report.push_str("\n\n⏹ Vérification interrompue par l'utilisateur.");
+            all_ok = false;
+            break;
+        }
         // Affiche la commande AVANT de l'exécuter : l'utilisateur voit ainsi
         // l'exécution défiler en direct, comme dans un terminal.
         on_output(&format!("\n$ {}\n", cmd));
@@ -428,6 +433,7 @@ fn climb_to_project_root(base: &str) -> String {
     }
 
     let cwd = std::env::current_dir().unwrap_or_default();
+    let is_cwd_start = trimmed == "." || trimmed.is_empty();
     let start = PathBuf::from(trimmed);
     let absolute = if start.is_absolute() {
         start
@@ -438,6 +444,9 @@ fn climb_to_project_root(base: &str) -> String {
     // Walk up ancestors (even if the deepest newly-staged subdirectory does not exist on disk yet)
     let mut cur: Option<&Path> = Some(absolute.as_path());
     while let Some(dir) = cur {
+        if dir == cwd.as_path() && !is_cwd_start {
+            break;
+        }
         if dir.is_dir() && PROJECT_MANIFESTS.iter().any(|m| dir.join(m).exists()) {
             return match dir.strip_prefix(&cwd) {
                 Ok(r) if r.as_os_str().is_empty() => ".".to_string(),
@@ -490,6 +499,10 @@ fn project_root_candidate(cwd: Option<&str>, staged: &[(String, String)]) -> Str
         if !common.is_empty() {
             return common.join("/");
         }
+    }
+
+    if let Some(active_root) = crate::session::active_project_root() {
+        return active_root.to_string_lossy().replace('\\', "/");
     }
 
     std::env::current_dir()
