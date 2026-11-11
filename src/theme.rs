@@ -10,6 +10,7 @@
 //! as a fallback, in the `src/` directory (`src/theme.json`). This lets the
 //! theme be edited and reloaded without touching the Rust source.
 
+use freya::code_editor::CodeEditorThemeExt;
 use freya::prelude::*;
 use serde::Deserialize;
 use std::path::Path;
@@ -397,9 +398,9 @@ impl ThemePreset {
         };
 
         let mut theme = if matches!(self, ThemePreset::GitHubLight) {
-            light_theme()
+            light_theme().with_light_code_editor()
         } else {
-            dark_theme()
+            dark_theme().with_dark_code_editor()
         };
         theme.name = self.name();
         theme.colors = colors;

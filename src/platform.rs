@@ -104,12 +104,16 @@ Clear-Host
         let path = dir.join("osc7.bash");
         let content = if cfg!(windows) {
             r#"# rustagent fichier d'initialisation OSC 7 pour Git Bash (Windows).
+__rustagent_start_pwd="$(pwd)"
+export CHERE_INVOKING=1
 if [ -f /etc/profile ]; then
     . /etc/profile
 fi
 if [ -f "$HOME/.bashrc" ]; then
     . "$HOME/.bashrc"
 fi
+cd "$__rustagent_start_pwd" 2>/dev/null || true
+unset __rustagent_start_pwd
 
 __rustagent_osc7() {
     local win_pwd
@@ -155,6 +159,8 @@ pub fn terminal_env() -> Vec<(&'static str, &'static str)> {
     if find_bash_executable().is_some() || !cfg!(windows) {
         env.push(("TERM", "xterm-256color"));
         env.push(("COLORTERM", "truecolor"));
+        // Empêche `/etc/profile` de Git Bash (MSYS2) de faire `cd "$HOME"` au démarrage
+        env.push(("CHERE_INVOKING", "1"));
     }
     if !cfg!(windows) {
         env.push(("LANG", "en_GB.UTF-8"));
@@ -300,4 +306,89 @@ pub fn config_dir() -> std::path::PathBuf {
     }
     // Repli final : un répertoire local au projet courant.
     std::path::PathBuf::from(".rustagent")
+}
+
+/// Ouvre une boîte de dialogue native du système d'exploitation pour sélectionner un dossier de projet.
+///
+/// Cette fonction est bloquante le temps que l'utilisateur choisisse le dossier : elle doit être
+/// appelée depuis `tokio::task::spawn_blocking`.
+pub fn pick_folder_dialog(initial_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if cfg!(windows) {
+        let init_str = initial_dir
+            .map(|p| p.to_string_lossy().replace('\'', "''"))
+            .unwrap_or_default();
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $dlg = New-Object System.Windows.Forms.FolderBrowserDialog; \
+             $dlg.Description = 'Sélectionner le dossier du projet à ouvrir dans RustAgent'; \
+             $dlg.ShowNewFolderButton = $true; \
+             if ('{}' -ne '' -and (Test-Path '{}')) {{ $dlg.SelectedPath = '{}' }}; \
+             if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ \
+                 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; \
+                 Write-Output $dlg.SelectedPath \
+             }}",
+            init_str, init_str, init_str
+        );
+        let output = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Sta", "-WindowStyle", "Hidden", "-Command", &script])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            let path = std::path::PathBuf::from(stdout);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+        None
+    } else if cfg!(target_os = "macos") {
+        let output = std::process::Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose folder with prompt \"Sélectionner le dossier du projet\")",
+            ])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            let path = std::path::PathBuf::from(stdout);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+        None
+    } else {
+        let output = std::process::Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=Sélectionner le dossier du projet",
+            ])
+            .output()
+            .or_else(|_| {
+                std::process::Command::new("kdialog")
+                    .args(["--getexistingdirectory", "."])
+                    .output()
+            })
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            let path = std::path::PathBuf::from(stdout);
+            if path.is_dir() {
+                return Some(path);
+            }
+        }
+        None
+    }
+}
+
+/// Construit la commande shell permettant au terminal intégré de se déplacer dans `dir`.
+pub fn cd_command(dir: &std::path::Path) -> String {
+    let uses_bash = find_bash_executable().is_some() || !cfg!(windows);
+    let normalized = dir.to_string_lossy().replace('\\', "/").replace('"', "\\\"");
+    if uses_bash {
+        format!("cd \"{}\"\n", normalized)
+    } else {
+        format!("Set-Location \"{}\"\r\n", normalized)
+    }
 }

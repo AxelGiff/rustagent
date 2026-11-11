@@ -1,15 +1,45 @@
-//! Code editor view panel component.
+//! Code editor view panel component with multi-file tabs and close (`✕`) buttons.
 
+use crate::language::SupportedLanguage;
 use crate::views::ui::{self, Tone};
 use freya::code_editor::*;
 use freya::prelude::*;
+use std::path::Path;
+
+/// Opens `path_str` from disk into `editor`, `current_language`, `file_name`, and `open_tabs`.
+pub fn load_file_into_editor(
+    path: &Path,
+    mut editor: Writable<CodeEditorData>,
+    mut current_language: Writable<SupportedLanguage>,
+    mut file_name: Writable<String>,
+    mut open_tabs: Writable<Vec<String>>,
+) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let lang = SupportedLanguage::from_extension(ext);
+        if let Some(l) = lang {
+            *current_language.write() = l;
+        }
+        *editor.write() = create_editor_data(&content, lang);
+        let path_str = path.to_string_lossy().to_string();
+        {
+            let mut tabs = open_tabs.write();
+            if !tabs.contains(&path_str) {
+                tabs.push(path_str.clone());
+            }
+        }
+        *file_name.write() = path_str;
+    }
+}
 
 /// Builds the code editor pane. When no file is opened (`file_name.is_empty()`),
 /// displays a styled RustAgent empty-state card indicating that no diff or file is active.
 #[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
 pub fn code_editor_panel(
     editor: Writable<CodeEditorData>,
-    file_name: String,
+    current_language: Writable<SupportedLanguage>,
+    file_name: Writable<String>,
+    open_tabs: Writable<Vec<String>>,
     has_diffs_count: usize,
     mut on_view_diff: impl FnMut() + 'static,
     mut on_save: impl FnMut() + 'static,
@@ -17,7 +47,8 @@ pub fn code_editor_panel(
     a11y_id: AccessibilityId,
     c: ColorsSheet,
 ) -> impl IntoElement {
-    if file_name.trim().is_empty() {
+    let active_file = file_name.read().clone();
+    if active_file.trim().is_empty() {
         return rect()
             .expanded()
             .content(Content::Flex)
@@ -27,7 +58,10 @@ pub fn code_editor_panel(
                     .child(
                         ui::row(8.)
                             .width(Size::flex(1.))
-                            .child(ui::subtitle("⚡ RustAgent — Revue & Éditeur", &c).font_weight(FontWeight::BOLD)),
+                            .child(
+                                ui::subtitle("⚡ RustAgent — Revue & Éditeur", &c)
+                                    .font_weight(FontWeight::BOLD),
+                            ),
                     )
                     .maybe_child((has_diffs_count > 0).then(|| {
                         ui::btn_sm(
@@ -85,16 +119,149 @@ pub fn code_editor_panel(
             .into_element();
     }
 
+    let mut tabs_list = open_tabs.read().clone();
+    if !tabs_list.contains(&active_file) {
+        tabs_list.push(active_file.clone());
+    }
+
+    let tab_elements = tabs_list.into_iter().map({
+        let active_file = active_file.clone();
+        let editor = editor.clone();
+        let current_language = current_language.clone();
+        let file_name = file_name.clone();
+        let open_tabs = open_tabs.clone();
+        let c = c.clone();
+        move |tab_path| {
+            let is_active = tab_path == active_file;
+            let short_name = Path::new(&tab_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| tab_path.clone());
+            let tab_key = format!("editor_tab_{}", tab_path);
+
+            let select_tab = {
+                let tab_path = tab_path.clone();
+                let editor = editor.clone();
+                let current_language = current_language.clone();
+                let file_name = file_name.clone();
+                let open_tabs = open_tabs.clone();
+                move |_| {
+                    load_file_into_editor(
+                        Path::new(&tab_path),
+                        editor.clone(),
+                        current_language.clone(),
+                        file_name.clone(),
+                        open_tabs.clone(),
+                    );
+                }
+            };
+
+            let close_tab = {
+                let tab_path = tab_path.clone();
+                let mut editor = editor.clone();
+                let mut current_language = current_language.clone();
+                let mut file_name = file_name.clone();
+                let mut open_tabs = open_tabs.clone();
+                move |_| {
+                    let next_tab = {
+                        let mut tabs = open_tabs.write();
+                        tabs.retain(|t| t != &tab_path);
+                        tabs.last().cloned()
+                    };
+                    let currently_open = file_name.read().clone();
+                    if currently_open == tab_path {
+                        if let Some(next) = next_tab {
+                            load_file_into_editor(
+                                Path::new(&next),
+                                editor.clone(),
+                                current_language.clone(),
+                                file_name.clone(),
+                                open_tabs.clone(),
+                            );
+                        } else {
+                            *file_name.write() = String::new();
+                            *editor.write() = create_editor_data("", None);
+                            let _ = &mut current_language;
+                        }
+                    }
+                }
+            };
+
+            rect()
+                .key(&tab_key)
+                .padding(Gaps::new(4., 8., 4., 10.))
+                .background(if is_active {
+                    c.surface_tertiary
+                } else {
+                    c.surface_secondary
+                })
+                .border(
+                    Border::new()
+                        .fill(if is_active { c.primary } else { c.border })
+                        .width(1.),
+                )
+                .corner_radius(6.)
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(6.)
+                .child(
+                    rect()
+                        .horizontal()
+                        .cross_align(Alignment::Center)
+                        .spacing(5.)
+                        .on_press(select_tab)
+                        .child(
+                            label()
+                                .text(format!("📄 {}", short_name))
+                                .color(if is_active {
+                                    c.text_primary
+                                } else {
+                                    c.text_secondary
+                                })
+                                .font_size(12.)
+                                .font_weight(if is_active {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                }),
+                        ),
+                )
+                .child(
+                    rect()
+                        .width(Size::px(18.))
+                        .height(Size::px(18.))
+                        .corner_radius(4.)
+                        .background(if is_active {
+                            c.surface_secondary
+                        } else {
+                            Color::TRANSPARENT
+                        })
+                        .center()
+                        .on_press(close_tab)
+                        .child(
+                            label()
+                                .text("✕")
+                                .color(c.text_secondary)
+                                .font_size(10.5)
+                                .font_weight(FontWeight::BOLD),
+                        ),
+                )
+                .into_element()
+        }
+    });
+
     rect()
         .expanded()
         .content(Content::Flex)
         .background(c.background)
         .child(
-            ui::panel_header(&c, 38.)
+            ui::panel_header(&c, 42.)
                 .child(
-                    ui::row(8.)
+                    ScrollView::new()
+                        .direction(Direction::Horizontal)
                         .width(Size::flex(1.))
-                        .child(ui::title(file_name, &c).font_size(13.)),
+                        .height(Size::px(32.))
+                        .child(ui::row(6.).children(tab_elements)),
                 )
                 .child(
                     ui::row(6.)
@@ -106,8 +273,12 @@ pub fn code_editor_panel(
                                 move |_| on_view_diff(),
                             )
                         }))
-                        .child(ui::btn_sm("💾 Sauvegarder", Tone::Neutral, &c, move |_| on_save()))
-                        .child(ui::btn_sm("▶ Exécuter", Tone::Primary, &c, move |_| on_execute())),
+                        .child(ui::btn_sm("💾 Sauvegarder", Tone::Neutral, &c, move |_| {
+                            on_save()
+                        }))
+                        .child(ui::btn_sm("▶ Exécuter", Tone::Primary, &c, move |_| {
+                            on_execute()
+                        })),
                 ),
         )
         .child(
@@ -115,7 +286,15 @@ pub fn code_editor_panel(
                 .width(Size::fill())
                 .height(Size::flex(1.))
                 .padding(Gaps::new(6., 6., 6., 0.))
-                .child(CodeEditor::new(editor, a11y_id).background(c.surface_secondary)),
+                .child(
+                    CodeEditor::new(editor, a11y_id)
+                        .background(c.surface_secondary)
+                        .line_selected_background(Color::from_argb(20, 122, 162, 247))
+                        .gutter_selected(c.primary)
+                        .gutter_unselected(c.text_placeholder)
+                        .cursor(c.text_primary)
+                        .highlight(Color::from_argb(65, 122, 162, 247)),
+                ),
         )
         .into_element()
 }

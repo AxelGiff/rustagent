@@ -2,11 +2,15 @@
 
 use crate::api;
 use crate::config;
+use crate::file_tree::{self, WorkspaceMentionIndex};
 use crate::types::{Message, Role, extract_spec_payload};
 use crate::views::diff_viewer::{DiffReviewState, changed_files_review_box};
 use crate::views::ui::{self, Tone};
 use freya::prelude::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::rc::Rc;
 
 /// Builds the full chat sidebar panel (scrollable messages, interactive cards, input area).
 #[allow(clippy::too_many_arguments)] // a UI panel receives one handle per piece of state
@@ -17,6 +21,8 @@ pub fn chat_panel(
     is_spec_mode: Writable<bool>,
     spec_selected_options: Writable<HashMap<String, String>>,
     spec_custom_input: Writable<String>,
+    current_dir: Readable<PathBuf>,
+    context_paths: Writable<Vec<PathBuf>>,
     settings_model_input: Writable<String>,
     _settings_endpoint_input: Readable<String>,
     _settings_key_input: Readable<String>,
@@ -28,6 +34,10 @@ pub fn chat_panel(
     on_send: impl FnMut(String) + Clone + 'static,
     c: ColorsSheet,
 ) -> impl IntoElement {
+    let mention_index = use_hook(|| Rc::new(RefCell::new(WorkspaceMentionIndex::default())));
+    let workspace_root = current_dir.read().clone();
+    mention_index.borrow_mut().sync_root(&workspace_root);
+
     let is_generating_val = *is_generating.read();
     let is_spec_val = *is_spec_mode.read();
 
@@ -440,10 +450,217 @@ pub fn chat_panel(
         )
     };
 
+    let pinned_list = context_paths.read().clone();
+    let has_pinned = !pinned_list.is_empty();
+    let pinned_chips_row = if has_pinned {
+        let chips = pinned_list.iter().map({
+            let context_paths = context_paths.clone();
+            let c = c.clone();
+            move |p| {
+                let path_clone = p.clone();
+                let mut context_paths = context_paths.clone();
+                let is_dir = p.is_dir();
+                let icon = if is_dir { "📁" } else { "📄" };
+                let short_name = p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.to_string_lossy().to_string());
+                rect()
+                    .padding(Gaps::new(3., 8., 3., 8.))
+                    .background(Color::from_argb(38, 16, 185, 129))
+                    .border(Border::new().fill(Color::from_rgb(16, 185, 129)).width(1.))
+                    .corner_radius(6.)
+                    .horizontal()
+                    .cross_align(Alignment::Center)
+                    .spacing(5.)
+                    .on_press(move |_| {
+                        context_paths.write().retain(|item| item != &path_clone);
+                    })
+                    .child(
+                        label()
+                            .text(format!("{} {}", icon, short_name))
+                            .color(Color::from_rgb(74, 222, 128))
+                            .font_size(11.)
+                            .font_weight(FontWeight::BOLD),
+                    )
+                    .child(
+                        label()
+                            .text("×")
+                            .color(c.text_secondary)
+                            .font_size(11.5)
+                            .font_weight(FontWeight::BOLD),
+                    )
+                    .into_element()
+            }
+        });
+
+        let clear_all_pinned = {
+            let mut context_paths = context_paths.clone();
+            move |_| {
+                context_paths.write().clear();
+            }
+        };
+
+        rect()
+            .key("pinned_chips_slot")
+            .width(Size::fill())
+            .height(Size::px(26.))
+            .child(
+                ui::row_fill(6.)
+                    .height(Size::px(26.))
+                    .child(
+                        label()
+                            .text("🎯 Cibles :")
+                            .color(c.text_secondary)
+                            .font_size(11.)
+                            .font_weight(FontWeight::BOLD),
+                    )
+                    .child(
+                        ScrollView::new()
+                            .direction(Direction::Horizontal)
+                            .width(Size::flex(1.))
+                            .height(Size::px(26.))
+                            .child(ui::row(6.).children(chips)),
+                    )
+                    .maybe_child((pinned_list.len() > 1).then(|| {
+                        rect()
+                            .padding(Gaps::new(2., 6., 2., 6.))
+                            .background(c.surface_tertiary)
+                            .corner_radius(4.)
+                            .on_press(clear_all_pinned)
+                            .child(
+                                label()
+                                    .text("Tout retirer")
+                                    .color(c.text_secondary)
+                                    .font_size(10.5),
+                            )
+                    })),
+            )
+    } else {
+        rect()
+            .key("pinned_chips_slot")
+            .width(Size::px(0.))
+            .height(Size::px(0.))
+    };
+
+    // Menu d'autocomplétion `@` lorsque l'utilisateur tape `@` ou `@recherche` dans l'input
+    // Toujours monté dans un slot fixe `.key("at_mention_slot")` pour que l'Input ne perde jamais le focus !
+    let current_input_text = input_value.read().clone();
+    let at_mention_popup = if let Some((_, query)) =
+        file_tree::extract_active_at_query(&current_input_text)
+    {
+        let suggestions = mention_index.borrow().filter_suggestions(query, 7);
+        let refresh_index = {
+            let mention_index = mention_index.clone();
+            let mut input_value = input_value.clone();
+            move |_| {
+                mention_index.borrow_mut().refresh();
+                let _ = input_value.write();
+            }
+        };
+
+        let items = suggestions.into_iter().map({
+            let input_value = input_value.clone();
+            let context_paths = context_paths.clone();
+            let c = c.clone();
+            move |entry| {
+                let mut input_value = input_value.clone();
+                let mut context_paths = context_paths.clone();
+                let rel_path = entry.rel_path.clone();
+                let full_path = entry.full_path.clone();
+                let icon = if entry.is_dir { "📁" } else { "📄" };
+                let row_key = format!("at_sug_{}", entry.rel_path);
+
+                rect()
+                    .key(&row_key)
+                    .width(Size::fill())
+                    .padding(Gaps::new(5., 10., 5., 10.))
+                    .background(c.surface_secondary)
+                    .corner_radius(6.)
+                    .horizontal()
+                    .cross_align(Alignment::Center)
+                    .content(Content::Flex)
+                    .spacing(8.)
+                    .on_press(move |_| {
+                        let cur = input_value.read().clone();
+                        let updated = file_tree::replace_active_at_query(&cur, &rel_path);
+                        *input_value.write() = updated;
+                        let mut pinned = context_paths.write();
+                        if !pinned.contains(&full_path) {
+                            pinned.push(full_path.clone());
+                        }
+                    })
+                    .child(
+                        label()
+                            .text(format!("{} {}", icon, entry.name))
+                            .color(if entry.is_dir {
+                                Color::from_rgb(74, 222, 128)
+                            } else {
+                                c.text_primary
+                            })
+                            .font_size(12.)
+                            .font_weight(FontWeight::BOLD),
+                    )
+                    .child(ui::spacer())
+                    .child(ui::muted(entry.rel_path, &c))
+                    .into_element()
+            }
+        });
+
+        rect()
+            .key("at_mention_slot")
+            .width(Size::fill())
+            .padding(Gaps::new(8., 12., 8., 12.))
+            .background(c.surface_primary)
+            .border(Border::new().fill(c.primary).width(BorderWidth {
+                top: 1.5,
+                right: 0.,
+                bottom: 0.,
+                left: 0.,
+            }))
+            .spacing(6.)
+            .content(Content::Flex)
+            .child(
+                ui::row_fill(6.)
+                    .child(
+                        label()
+                            .text(if query.is_empty() {
+                                "🎯 Cibler un fichier ou dossier (@) — cliquez pour ajouter au contexte :".to_string()
+                            } else {
+                                format!("🎯 Recherche `@{}` — cliquez pour cibler :", query)
+                            })
+                            .color(c.primary)
+                            .font_size(11.5)
+                            .font_weight(FontWeight::BOLD),
+                    )
+                    .child(ui::spacer())
+                    .child(
+                        rect()
+                            .padding(Gaps::new(2., 6., 2., 6.))
+                            .background(c.surface_tertiary)
+                            .corner_radius(4.)
+                            .on_press(refresh_index)
+                            .child(
+                                label()
+                                    .text("↻ Actualiser")
+                                    .color(c.text_secondary)
+                                    .font_size(10.5),
+                            ),
+                    ),
+            )
+            .child(ui::col(4.).children(items))
+    } else {
+        rect()
+            .key("at_mention_slot")
+            .width(Size::px(0.))
+            .height(Size::px(0.))
+    };
+
     // Input area with text input and model selector bar
     let input_area = rect()
+        .key("chat_input_area")
         .width(Size::fill())
-        .height(Size::px(104.))
+        .height(Size::px(if has_pinned { 138. } else { 104. }))
         .background(c.surface_primary)
         .border(Border::new().fill(c.border).width(BorderWidth {
             top: 1.,
@@ -452,22 +669,25 @@ pub fn chat_panel(
             left: 0.,
         }))
         .padding(Gaps::new(8., 12., 8., 12.))
-        .spacing(8.)
+        .spacing(6.)
         .content(Content::Flex)
+        .child(pinned_chips_row)
         .child(
             // Row 1: Chat input and send/stop button
             ui::row_fill(8.)
+                .key("chat_input_row_1")
                 .height(Size::px(40.))
                 .child(
                     Input::new(input_value)
+                        .key("main_chat_prompt_input")
                         .background(c.surface_tertiary)
                         .focus_background(c.tertiary)
                         .border_fill(c.border)
                         .color(c.text_secondary)
                         .placeholder(if is_spec_val {
-                            "🛡️ Mode Spec : décrivez la fonctionnalité à spécifier (Security by Design)..."
+                            "🛡️ Mode Spec : décrivez la fonctionnalité (tapez @ pour cibler un fichier/dossier)..."
                         } else {
-                            "⚡ Quick Edit : modification rapide (ou redirection Spec si gros chantier)..."
+                            "⚡ Quick Edit : décrivez la modification (tapez @ pour cibler un fichier/dossier)..."
                         })
                         .width(Size::flex(1.))
                         .on_submit(on_submit_handler),
@@ -481,6 +701,7 @@ pub fn chat_panel(
         .child(
             // Row 2: Model select dropdown, refresh button, mode toggle and context label
             ui::row_fill(8.)
+                .key("chat_input_row_2")
                 .height(Size::px(38.))
                 .child(model_select)
                 .child(refresh_models_button)
@@ -500,6 +721,7 @@ pub fn chat_panel(
         .expanded()
         .content(Content::Flex)
         .background(c.background)
-        .child(chat_area)
+        .child(chat_area.key("chat_messages_area"))
+        .child(at_mention_popup)
         .child(input_area)
 }

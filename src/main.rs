@@ -48,10 +48,9 @@ fn app() -> impl IntoElement {
     let c = theme.read().colors.clone();
     let editor_a11y_id = use_a11y();
 
-    let startup_key_config = config::ApiKeyConfig::load();
-    let startup_key_warning = startup_key_config.validate().err();
-
     let messages = use_state(|| {
+        let startup_key_config = config::ApiKeyConfig::load();
+        let startup_key_warning = startup_key_config.validate().err();
         let mut initial = vec![Message {
             role: Role::AI,
             content: "👋 Bonjour ! Je suis **RustAgent**, votre assistant de développement propulsé par **Albert API**.\n\nDécrivez une tâche en **⚡ Quick Edit** ou en **🛡️ Mode Spec (Security by Design)** : chaque modification générera une revue de diff interactive que vous pourrez inspecter et valider.".to_string(),
@@ -69,10 +68,12 @@ fn app() -> impl IntoElement {
 
     let current_dir = use_state(|| std::env::current_dir().unwrap_or_default());
     let expanded_dirs = use_state(std::collections::HashSet::<std::path::PathBuf>::new);
+    let context_paths = use_state(Vec::<std::path::PathBuf>::new);
     let pending_diffs = use_state(Vec::<diff::PendingDiff>::new);
     let selected_diff_idx = use_state(|| 0usize);
     let inline_diff_idx = use_state(|| None::<usize>);
     let review_box_expanded = use_state(|| false);
+    let split_diff_view = use_state(|| false);
     let chat_scroll = use_scroll_controller(|| ScrollConfig {
         default_vertical_position: ScrollPosition::End,
         ..Default::default()
@@ -99,7 +100,7 @@ fn app() -> impl IntoElement {
     });
 
     let show_settings = use_state(|| false);
-    let saved_cfg = config::ApiKeyConfig::load();
+    let saved_cfg = use_hook(config::ApiKeyConfig::load);
     let settings_key_input = use_state(|| saved_cfg.key.clone());
     let settings_model_input = use_state(|| {
         saved_cfg
@@ -142,10 +143,34 @@ fn app() -> impl IntoElement {
     }
 
     let current_language = use_state(|| SupportedLanguage::Rust);
-
     let editor = use_state(|| create_editor_data("", None));
-
     let file_name = use_state(String::new);
+    let open_tabs = use_state(Vec::<String>::new);
+
+    let open_project = {
+        let mut current_dir = current_dir;
+        let mut expanded_dirs = expanded_dirs;
+        let terminal_handle = terminal_handle;
+        move || {
+            let init_dir = current_dir.read().clone();
+            let terminal_opt = terminal_handle.read().clone();
+            spawn(async move {
+                let picked =
+                    tokio::task::spawn_blocking(move || platform::pick_folder_dialog(Some(&init_dir)))
+                        .await
+                        .ok()
+                        .flatten();
+                if let Some(chosen) = picked {
+                    expanded_dirs.write().clear();
+                    *current_dir.write() = chosen.clone();
+                    if let Some(term) = terminal_opt {
+                        let cmd = platform::cd_command(&chosen);
+                        let _ = term.write(cmd.as_bytes());
+                    }
+                }
+            });
+        }
+    };
 
     let clear_chat = {
         let mut messages = messages;
@@ -154,9 +179,11 @@ fn app() -> impl IntoElement {
         let mut inline_diff_idx = inline_diff_idx;
         let mut spec_selected_options = spec_selected_options;
         let mut spec_custom_input = spec_custom_input;
+        let mut context_paths = context_paths;
         move || {
             messages.write().clear();
             pending_diffs.write().clear();
+            context_paths.write().clear();
             *selected_diff_idx.write() = 0;
             *inline_diff_idx.write() = None;
             spec_selected_options.write().clear();
@@ -237,6 +264,7 @@ fn app() -> impl IntoElement {
         selected_diff_idx,
         inline_diff_idx,
         review_box_expanded,
+        split_diff_view,
         chat_scroll,
         center_view_mode,
         messages,
@@ -246,21 +274,21 @@ fn app() -> impl IntoElement {
     };
 
     let open_file = {
-        let editor = std::rc::Rc::new(std::cell::RefCell::new(editor));
-        let current_language = std::rc::Rc::new(std::cell::RefCell::new(current_language));
-        let file_name = std::rc::Rc::new(std::cell::RefCell::new(file_name));
-        let center_view_mode = std::rc::Rc::new(std::cell::RefCell::new(center_view_mode));
+        let editor = editor;
+        let current_language = current_language;
+        let file_name = file_name;
+        let open_tabs = open_tabs;
+        let center_view_mode = center_view_mode;
         move |path: std::path::PathBuf| {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let lang = SupportedLanguage::from_extension(ext);
-                if let Some(l) = lang {
-                    *current_language.borrow_mut().write() = l;
-                }
-                *editor.borrow_mut().write() = create_editor_data(&content, lang);
-                *file_name.borrow_mut().write() = path.to_string_lossy().to_string();
-                *center_view_mode.borrow_mut().write() = CenterViewMode::Editor;
-            }
+            let mut center_view_mode = center_view_mode;
+            load_file_into_editor(
+                &path,
+                editor.into_writable(),
+                current_language.into_writable(),
+                file_name.into_writable(),
+                open_tabs.into_writable(),
+            );
+            *center_view_mode.write() = CenterViewMode::Editor;
         }
     };
 
@@ -271,14 +299,48 @@ fn app() -> impl IntoElement {
         let mut file_name = file_name;
         let mut is_generating = is_generating;
         let mut chat_scroll = chat_scroll;
+        let mut context_paths = context_paths;
         move |user_message: String| {
             if !should_send_message(&user_message) {
                 return;
             }
 
+            let root_snapshot = current_dir.read().clone();
+            let at_resolved = file_tree::resolve_at_mentions_in_text(&user_message, &root_snapshot);
+            if !at_resolved.is_empty() {
+                let mut ctx = context_paths.write();
+                for p in at_resolved {
+                    if !ctx.contains(&p) {
+                        ctx.push(p);
+                    }
+                }
+            }
+
+            let pinned_snapshot = context_paths.read().clone();
+            let display_user_msg = if pinned_snapshot.is_empty() {
+                user_message.clone()
+            } else {
+                let targets = pinned_snapshot
+                    .iter()
+                    .map(|p| {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_else(|| p.to_string_lossy().to_string());
+                        if p.is_dir() {
+                            format!("📁 {}", name)
+                        } else {
+                            format!("📄 {}", name)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                format!("🎯 {}\n{}", targets, user_message)
+            };
+
             messages.write().push(Message {
                 role: Role::User,
-                content: user_message.clone(),
+                content: display_user_msg,
             });
             chat_scroll.scroll_to(ScrollPosition::End, Direction::Vertical);
 
@@ -305,6 +367,20 @@ fn app() -> impl IntoElement {
             let history_snapshot = messages.read().clone();
             let current_editor_file = file_name.read().clone();
             let current_editor_code = editor.read().to_string();
+            let mut current_dir_stream = current_dir;
+            let mut expanded_dirs_stream = expanded_dirs;
+            let terminal_for_sync = terminal_handle.read().clone();
+            if let Some(detected_proj) = tools::detect_project_dir(&user_message, &[])
+                && detected_proj != root_snapshot
+            {
+                expanded_dirs_stream.write().clear();
+                *current_dir_stream.write() = detected_proj.clone();
+                if let Some(ref term) = terminal_for_sync {
+                    let cmd = platform::cd_command(&detected_proj);
+                    let _ = term.write(cmd.as_bytes());
+                }
+            }
+
             let mut pending_diffs_stream = pending_diffs;
             let mut center_view_mode_stream = center_view_mode;
             let mut messages_stream = messages;
@@ -337,6 +413,7 @@ fn app() -> impl IntoElement {
                     history_snapshot,
                     current_editor_code,
                     current_editor_file,
+                    pinned_snapshot,
                     pending_diffs_snapshot,
                     wants_code,
                     detected_language,
@@ -347,6 +424,19 @@ fn app() -> impl IntoElement {
                         chat_scroll_for_chunk.scroll_to(ScrollPosition::End, Direction::Vertical);
                     },
                     |diff| {
+                        let diff_path = std::path::PathBuf::from(&diff.path);
+                        let cur_root = current_dir_stream.peek().clone();
+                        if !diff_path.starts_with(&cur_root)
+                            && let Some(new_root) = tools::infer_project_root_from_path(&diff_path)
+                            && new_root != cur_root
+                        {
+                            expanded_dirs_stream.write().clear();
+                            *current_dir_stream.write() = new_root.clone();
+                            if let Some(ref term) = terminal_for_sync {
+                                let cmd = platform::cd_command(&new_root);
+                                let _ = term.write(cmd.as_bytes());
+                            }
+                        }
                         diff::upsert_diff(&mut pending_diffs_for_cb.write(), diff);
                         *center_view_for_cb.write() = CenterViewMode::Diff;
                         chat_scroll_for_cb.scroll_to(ScrollPosition::End, Direction::Vertical);
@@ -468,7 +558,9 @@ fn app() -> impl IntoElement {
     } else {
         code_editor_panel(
             editor.into(),
-            file_name.read().clone(),
+            current_language.into_writable(),
+            file_name.into_writable(),
+            open_tabs.into_writable(),
             pending_diffs
                 .read()
                 .iter()
@@ -495,6 +587,8 @@ fn app() -> impl IntoElement {
         is_spec_mode.into_writable(),
         spec_selected_options.into_writable(),
         spec_custom_input.into_writable(),
+        current_dir.into(),
+        context_paths.into_writable(),
         settings_model_input.into_writable(),
         settings_endpoint_input.into(),
         settings_key_input.into(),
@@ -508,8 +602,10 @@ fn app() -> impl IntoElement {
     );
 
     let file_tree = file_tree_panel(
-        current_dir.into(),
+        current_dir.into_writable(),
         expanded_dirs.into(),
+        context_paths.into_writable(),
+        pending_diffs.into(),
         c.clone(),
         open_file.clone(),
     );
@@ -524,6 +620,7 @@ fn app() -> impl IntoElement {
         models_loading.into_writable(),
         settings_endpoint_input.into(),
         settings_key_input.into(),
+        open_project,
         clear_chat,
         reset_terminal,
         c.clone(),
