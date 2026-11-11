@@ -264,6 +264,7 @@ where
 {
     let (bg, hover_bg, border_col, fg) = tone_button_colors(tone, c);
     Button::new()
+        .cursor_icon(CursorIcon::Pointer)
         .background(bg)
         .hover_background(hover_bg)
         .border_fill(border_col)
@@ -291,6 +292,7 @@ where
 {
     let (bg, hover_bg, border_col, fg) = tone_button_colors(tone, c);
     Button::new()
+        .cursor_icon(CursorIcon::Pointer)
         .background(bg)
         .hover_background(hover_bg)
         .border_fill(border_col)

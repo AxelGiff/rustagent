@@ -120,6 +120,26 @@ pub fn resolve_tool_path(raw: &str) -> String {
         return format!("{}{}", clean_drive, trimmed.replace('\\', "/"));
     }
 
+    // Priorité au projet actif ouvert dans l'interface pour les chemins relatifs.
+    if let Some(active_root) = crate::session::active_project_root() {
+        let clean_rel = trimmed
+            .trim_start_matches("./")
+            .trim_start_matches(".\\");
+        if clean_rel == "." || clean_rel.is_empty() {
+            return active_root.to_string_lossy().replace('\\', "/");
+        }
+        let p_check = Path::new(clean_rel);
+        if !p_check.is_absolute() {
+            let in_project = active_root.join(clean_rel);
+            if in_project.exists()
+                || in_project.parent().map(|par| par.exists()).unwrap_or(false)
+                || active_root.is_dir()
+            {
+                return in_project.to_string_lossy().replace('\\', "/");
+            }
+        }
+    }
+
     let p = Path::new(trimmed);
     if p.exists() {
         return trimmed.to_string();
@@ -163,7 +183,7 @@ pub fn search_dir_recursive(
     max_depth: usize,
     results: &mut Vec<String>,
 ) {
-    if depth > max_depth || results.len() >= 35 {
+    if depth > max_depth || results.len() >= 60 {
         return;
     }
 
@@ -175,7 +195,7 @@ pub fn search_dir_recursive(
     let query_lower = query.trim().trim_start_matches('*').to_lowercase();
 
     for entry in entries.flatten() {
-        if results.len() >= 35 {
+        if results.len() >= 60 {
             break;
         }
         let name = entry.file_name().to_string_lossy().to_string();
@@ -206,7 +226,7 @@ pub fn search_dir_recursive(
         if name_lower.contains(&query_lower) {
             let kind = if path.is_dir() { "[DIR] " } else { "[FILE]" };
             results.push(format!("{} {}", kind, display_path));
-            if results.len() >= 35 {
+            if results.len() >= 60 {
                 break;
             }
         }
@@ -219,7 +239,7 @@ pub fn search_dir_recursive(
             for (line_no, line) in content.lines().enumerate() {
                 if line.to_lowercase().contains(&query_lower) {
                     results.push(format!("{}:{}: {}", display_path, line_no + 1, line.trim()));
-                    if results.len() >= 35 {
+                    if results.len() >= 60 {
                         break;
                     }
                 }
@@ -543,20 +563,36 @@ where
     let mut stderr_acc = String::new();
 
     let drain = async {
-        while let Some(line) = rx.recv().await {
-            if line.stderr {
-                stderr_acc.push_str(&line.text);
-                stderr_acc.push('\n');
-            } else {
-                stdout_acc.push_str(&line.text);
-                stdout_acc.push('\n');
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if crate::api::is_cancel_requested() {
+                        return true;
+                    }
+                }
+                maybe_line = rx.recv() => {
+                    match maybe_line {
+                        Some(line) => {
+                            if line.stderr {
+                                stderr_acc.push_str(&line.text);
+                                stderr_acc.push('\n');
+                            } else {
+                                stdout_acc.push_str(&line.text);
+                                stdout_acc.push('\n');
+                            }
+                            on_line(&line.text);
+                        }
+                        None => return false,
+                    }
+                }
             }
-            on_line(&line.text);
         }
     };
 
-    let timed_out = tokio::time::timeout(timeout, drain).await.is_err();
-    if timed_out {
+    let drain_result = tokio::time::timeout(timeout, drain).await;
+    let timed_out = drain_result.is_err();
+    let was_cancelled = drain_result == Ok(true);
+    if timed_out || was_cancelled {
         let _ = child.kill().await;
     }
     let status = child.wait().await;
@@ -564,14 +600,21 @@ where
     // up (verbose build) a reader may be blocked on `send`, which only unblocks
     // once the receiver is gone.
     drop(rx);
-    if timed_out {
-        // On timeout a reader may be stuck on a pipe that a background child
+    if timed_out || was_cancelled {
+        // On timeout or cancel a reader may be stuck on a pipe that a background child
         // still holds open; abort instead of blocking the caller.
         stdout_task.abort();
         stderr_task.abort();
     } else {
         let _ = stdout_task.await;
         let _ = stderr_task.await;
+    }
+
+    if was_cancelled {
+        return (
+            false,
+            "⏹ Commande interrompue par l'utilisateur.".to_string(),
+        );
     }
 
     if timed_out {

@@ -566,14 +566,16 @@ pub fn infer_project_root_from_path(path: &Path) -> Option<std::path::PathBuf> {
 /// et pré-charge la liste de ses fichiers principaux pour éviter au modèle d'appeler
 /// `list_directory` / `search_files` en boucle.
 pub fn detect_project_snapshot(user_msg: &str, history_texts: &[String]) -> String {
-    let Some(project_dir) = detect_project_dir(user_msg, history_texts) else {
+    let project_dir = detect_project_dir(user_msg, history_texts)
+        .or_else(|| crate::session::active_project_root());
+    let Some(project_dir) = project_dir else {
         return String::new();
     };
 
     let mut files = Vec::new();
-    search_dir_recursive(&project_dir, "", 0, 4, &mut files);
-    if files.len() > 25 {
-        files.truncate(25);
+    search_dir_recursive(&project_dir, "", 0, 10, &mut files);
+    if files.len() > 40 {
+        files.truncate(40);
     }
 
     let dir_display = project_dir.to_string_lossy().replace('\\', "/");
@@ -623,8 +625,10 @@ pub fn write_auto_plan(user_msg: &str, history_texts: &[String]) -> Option<Strin
         user_msg.trim()
     );
 
-    let plan_path = Path::new("plan.md");
-    ensure_plan_in_gitignore(plan_path);
-    let _ = std::fs::write(plan_path, &plan_md);
-    Some("plan.md".to_string())
+    let plan_path = crate::session::active_project_root()
+        .map(|r| r.join("plan.md"))
+        .unwrap_or_else(|| Path::new("plan.md").to_path_buf());
+    ensure_plan_in_gitignore(&plan_path);
+    let _ = std::fs::write(&plan_path, &plan_md);
+    Some(plan_path.to_string_lossy().replace('\\', "/"))
 }

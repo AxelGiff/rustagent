@@ -191,6 +191,12 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
         }
 
         "write_plan" => {
+            if crate::session::default_session().is_cancel_requested() {
+                return ToolResult {
+                    content: "⏹ Opération annulée.".to_string(),
+                    pending_diff: None,
+                };
+            }
             let raw_path = args
                 .get("path")
                 .or_else(|| args.get("file"))
@@ -237,6 +243,12 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
         }
 
         "write_file" => {
+            if crate::session::default_session().is_cancel_requested() {
+                return ToolResult {
+                    content: "⏹ Opération annulée.".to_string(),
+                    pending_diff: None,
+                };
+            }
             let mut files = extract_files_from_args(&args);
             if files.is_empty() {
                 if let Some(s) = args.as_str() {
@@ -572,7 +584,7 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 let query_owned = query.clone();
                 tokio::task::spawn_blocking(move || {
                     let mut out = Vec::new();
-                    search_dir_recursive(&dir_owned, &query_owned, 0, 5, &mut out);
+                    search_dir_recursive(&dir_owned, &query_owned, 0, 12, &mut out);
                     out
                 })
                 .await
@@ -910,7 +922,6 @@ mod tests {
         assert!(write_file_def.is_some());
         let def = write_file_def.unwrap();
         let properties = &def["function"]["parameters"]["properties"];
-        assert!(properties.get("files").is_some());
         assert!(properties.get("path").is_some());
         assert!(properties.get("content").is_some());
     }

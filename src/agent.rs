@@ -55,11 +55,17 @@ pub fn build_active_context(pending_diffs: &[diff::PendingDiff], history: &[Mess
     }
 }
 
-/// Builds the environment and file context (home dir, cwd, project snapshot, active editor file).
-pub fn build_env_context(editor_code: &str, editor_file: &str, project_snapshot: &str) -> String {
+/// Builds the environment and file context (home dir, active project, cwd, project snapshot, active editor file).
+pub fn build_env_context(
+    editor_code: &str,
+    editor_file: &str,
+    project_snapshot: &str,
+    project_root: &std::path::Path,
+) -> String {
     let home_dir_str = tools::user_home_dir()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|| "~".to_string());
+    let project_dir_str = project_root.to_string_lossy().replace('\\', "/");
     let cwd_dir_str = std::env::current_dir()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| ".".to_string());
@@ -75,8 +81,8 @@ pub fn build_env_context(editor_code: &str, editor_file: &str, project_snapshot:
     };
 
     format!(
-        "\n\n[ENVIRONNEMENT & CHEMINS]\n- Dossier Home utilisateur (`~` / `$HOME`) : `{}`\n- Dossier courant de l'application : `{}`{}{}",
-        home_dir_str, cwd_dir_str, project_snapshot, editor_context
+        "\n\n[PROJET ACTIF CIBLE OUVERT DANS RUSTAGENT]\n- Dossier racine du projet ouvert : `{}`\n- RÈGLE CRITIQUE : L'utilisateur a ouvert le projet situé dans `{}`. TOUTES tes analyses (audit de sécurité OWASP, modèle de menaces, refactoring), lectures (`read_file`), recherches (`list_directory`, `search_files`), modifications (`edit_file`) et créations (`write_file`) DOIVENT impérativement cibler ce projet `{}` et ses fichiers sources.\nTu ne dois JAMAIS analyser ni modifier le code source de l'application RustAgent (`{}`) !\n\n[ENVIRONNEMENT & CHEMINS]\n- Dossier Home utilisateur (`~` / `$HOME`) : `{}`{}{}",
+        project_dir_str, project_dir_str, project_dir_str, cwd_dir_str, home_dir_str, project_snapshot, editor_context
     )
 }
 
@@ -189,6 +195,7 @@ DÉMARCHE :
 RÈGLES :
 - Sois AUTONOME : n'attends aucune confirmation, n'annonce pas ce que tu vas faire — FAIS-LE.
 - Si un outil échoue, adapte-toi et réessaie dans ce même tour.
+- RÈGLE STRICTE POUR AUDITS ET ANALYSES DE SÉCURITÉ (OWASP) : si la demande est un audit, une analyse ou une revue, explore les fichiers sources du projet en profondeur avec `read_file` et `search_files`, puis rédige ton rapport d'audit COMPLET en Markdown directement dans ta réponse dans la conversation. Ne crée JAMAIS de fichier sur le disque (aucun fichier `.md`, aucun appel à `write_file` ou `edit_file`). L'audit est purement consultatif dans le chat !
 
 REDIRECTION VERS MODE SPEC (UNIQUEMENT SI ARCHITECTURE COMPLEXE NON SPÉCIFIÉE) :
 - Si l'utilisateur demande une grosse fonctionnalité d'architecture/sécurité floue (> 3 fichiers, auth/permissions complexes) et qu'aucun `plan.md` n'existe : explique en 2 phrases les enjeux Security by Design et termine par `[RECOMMEND_SPEC_MODE]`.{}{}{}",
@@ -279,6 +286,7 @@ pub async fn run_agent_turn(
     history: Vec<Message>,
     current_editor_code: String,
     current_editor_file: String,
+    project_root: std::path::PathBuf,
     pinned_paths: Vec<std::path::PathBuf>,
     pending_diffs: Vec<diff::PendingDiff>,
     wants_code: bool,
@@ -329,8 +337,12 @@ pub async fn run_agent_turn(
             .take(4)
             .any(|m| m.content.contains("SPEC_QUESTIONS_JSON:"));
 
-    // `write_auto_plan` écrit sur disque : exécuté hors du runtime async.
-    let plan_file = {
+    let is_audit = api::policy::analyze_intent(&lower_prompt, &user_message, "", &history).audit_intent;
+
+    // `write_auto_plan` écrit sur disque : exécuté hors du runtime async (uniquement hors mode audit).
+    let plan_file = if is_audit {
+        None
+    } else {
         let message = user_message.clone();
         let history_texts = history_texts.clone();
         tokio::task::spawn_blocking(move || tools::write_auto_plan(&message, &history_texts))
@@ -363,14 +375,17 @@ pub async fn run_agent_turn(
             &current_editor_code,
             &current_editor_file,
             &project_snapshot,
+            &project_root,
         ),
         pinned_context
     );
 
-    let plan_context = if let Ok(plan_text) = tokio::fs::read_to_string("plan.md").await {
+    let plan_path = project_root.join("plan.md");
+    let plan_context = if let Ok(plan_text) = tokio::fs::read_to_string(&plan_path).await {
         let truncated = tools::truncate_output(&plan_text, 25, 1200);
         format!(
-            "\n\n[PLAN DE LA FONCTIONNALITÉ PRÉVUE (`plan.md`)]\n{}",
+            "\n\n[PLAN DU PROJET ACTIF (`{}`)]\n{}",
+            plan_path.to_string_lossy().replace('\\', "/"),
             truncated
         )
     } else {
@@ -400,9 +415,13 @@ pub async fn run_agent_turn(
 
     match result {
         Ok(response) => {
+            let was_cancelled = response.contains("⏹") || crate::session::default_session().is_cancel_requested();
+
             if !pending_diffs.is_empty()
                 || response.contains("SPEC_QUESTIONS_JSON:")
                 || response.contains("[RECOMMEND_SPEC_MODE]")
+                || is_audit
+                || was_cancelled
             {
                 Ok((response, Vec::new()))
             } else {

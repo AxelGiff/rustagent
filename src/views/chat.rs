@@ -17,7 +17,7 @@ use std::rc::Rc;
 pub fn chat_panel(
     messages: Readable<Vec<Message>>,
     input_value: Writable<String>,
-    is_generating: Readable<bool>,
+    is_generating: Writable<bool>,
     is_spec_mode: Writable<bool>,
     spec_selected_options: Writable<HashMap<String, String>>,
     spec_custom_input: Writable<String>,
@@ -54,8 +54,17 @@ pub fn chat_panel(
     };
 
     // Chat scrollable area
-    let chat_area = rect().width(Size::fill()).height(Size::flex(1.)).child(
-        ScrollView::new_controlled(diff_review.chat_scroll).child(
+    let mut user_scrolled_wheel = diff_review.user_scrolled_up;
+    let chat_area = rect()
+        .width(Size::fill())
+        .height(Size::flex(1.))
+        .on_wheel(move |e: Event<WheelEventData>| {
+            if e.delta_y > 0.0 {
+                *user_scrolled_wheel.write() = true;
+            }
+        })
+        .child(
+            ScrollView::new_controlled(diff_review.chat_scroll).child(
             rect().width(Size::fill()).padding(16.).children(
                 messages.read().iter().map(|msg| {
                 let is_user = msg.role == Role::User;
@@ -142,6 +151,7 @@ pub fn chat_panel(
                             )
                             .child(
                                 Button::new()
+                                    .cursor_icon(CursorIcon::Pointer)
                                     .background(Color::from_rgb(16, 185, 129))
                                     .hover_background(Color::from_rgb(5, 150, 105))
                                     .border_fill(Color::TRANSPARENT)
@@ -225,6 +235,7 @@ pub fn chat_panel(
                             let mut spec_selected_options_btn = spec_selected_options.clone();
                             opts_col = opts_col.child(
                                 Button::new()
+                                    .cursor_icon(CursorIcon::Pointer)
                                     .background(if is_chosen {
                                         Color::from_rgb(16, 185, 129)
                                     } else {
@@ -290,6 +301,7 @@ pub fn chat_panel(
                             .spacing(8.)
                             .child(
                                 Button::new()
+                                    .cursor_icon(CursorIcon::Pointer)
                                     .background(Color::from_rgb(16, 185, 129))
                                     .hover_background(Color::from_rgb(5, 150, 105))
                                     .border_fill(Color::TRANSPARENT)
@@ -324,6 +336,7 @@ pub fn chat_panel(
                             )
                             .child(
                                 Button::new()
+                                    .cursor_icon(CursorIcon::Pointer)
                                     .background(c.surface_tertiary)
                                     .hover_background(c.tertiary)
                                     .border_fill(c.border)
@@ -426,8 +439,10 @@ pub fn chat_panel(
         },
     );
 
-    let stop_button = ui::btn_sm("⏹ Arrêter", Tone::Danger, &c, |_| {
+    let mut is_generating_stop = is_generating;
+    let stop_button = ui::btn_sm("⏹ Arrêter", Tone::Danger, &c, move |_| {
         api::request_cancel();
+        *is_generating_stop.write() = false;
     });
 
     let mode_toggle_button = {
@@ -595,12 +610,17 @@ pub fn chat_panel(
                             .text(format!("{} {}", icon, entry.name))
                             .color(if entry.is_dir {
                                 Color::from_rgb(74, 222, 128)
+                            } else if entry.is_recent {
+                                Color::from_rgb(147, 197, 253)
                             } else {
                                 c.text_primary
                             })
                             .font_size(12.)
                             .font_weight(FontWeight::BOLD),
                     )
+                    .maybe_child(entry.is_recent.then(|| {
+                        ui::tag("💙 VS Code", Tone::Primary, &c)
+                    }))
                     .child(ui::spacer())
                     .child(ui::muted(entry.rel_path, &c))
                     .into_element()
@@ -693,7 +713,18 @@ pub fn chat_panel(
                         .on_submit(on_submit_handler),
                 )
                 .child(if is_generating_val {
-                    stop_button.into_element()
+                    let mut stop_row = ui::row(6.).child(stop_button);
+                    if *diff_review.user_scrolled_up.read() {
+                        let mut user_scrolled_btn = diff_review.user_scrolled_up;
+                        let mut chat_scroll_btn = diff_review.chat_scroll;
+                        stop_row = stop_row.child(
+                            ui::btn_sm("↓ Suivre", Tone::Primary, &c, move |_| {
+                                *user_scrolled_btn.write() = false;
+                                chat_scroll_btn.scroll_to(ScrollPosition::End, Direction::Vertical);
+                            })
+                        );
+                    }
+                    stop_row.into_element()
                 } else {
                     ui::btn_sm("Envoyer", Tone::Primary, &c, send_message_handler).into_element()
                 }),
