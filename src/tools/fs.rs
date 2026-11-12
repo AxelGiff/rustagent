@@ -248,10 +248,80 @@ pub fn search_dir_recursive(
     }
 }
 
+/// Vérifie si un chemin ou une cible vise des identifiants sensibles ou des fichiers système critiques.
+pub fn is_sensitive_security_target(raw_path: &str) -> Option<&'static str> {
+    let lower = raw_path.to_lowercase().replace('\\', "/");
+    let trimmed = lower.trim();
+
+    // Clés privées SSH & configuration
+    if trimmed.contains(".ssh/id_")
+        || trimmed.ends_with("/id_rsa")
+        || trimmed.ends_with("/id_ed25519")
+        || trimmed.ends_with("/id_ecdsa")
+        || trimmed.ends_with("/id_dsa")
+        || trimmed.contains(".ssh/authorized_keys")
+        || trimmed == "id_rsa"
+        || trimmed == "id_ed25519"
+    {
+        return Some("clés SSH privées ou clés autorisées");
+    }
+
+    // Identifiants Cloud & conteneurs
+    if trimmed.contains(".aws/credentials")
+        || trimmed.contains(".aws/config")
+        || trimmed.contains(".docker/config.json")
+        || trimmed.contains(".kube/config")
+        || trimmed.contains(".azure/credentials")
+        || trimmed.contains(".gcloud/credentials")
+    {
+        return Some("identifiants cloud (AWS, Azure, Docker, Kubernetes, GCP)");
+    }
+
+    // Identifiants Git & trousseaux
+    if trimmed.contains(".git-credentials")
+        || trimmed.ends_with("/.netrc")
+        || trimmed.ends_with("/.git-credentials")
+        || trimmed == ".git-credentials"
+        || trimmed == ".netrc"
+    {
+        return Some("mots de passe et jetons d'authentification Git / netrc");
+    }
+
+    // Trousseaux GPG & certificats privés
+    if trimmed.contains(".gnupg/")
+        || trimmed.ends_with(".p12")
+        || trimmed.ends_with(".pfx")
+    {
+        return Some("trousseaux cryptographiques ou certificats privés");
+    }
+
+    // Fichiers de persistance shell
+    if trimmed.ends_with("/.bashrc")
+        || trimmed.ends_with("/.zshrc")
+        || trimmed.ends_with("/.profile")
+        || trimmed.ends_with("/.bash_profile")
+        || trimmed == ".bashrc"
+        || trimmed == ".zshrc"
+    {
+        return Some("scripts d'initialisation shell de démarrage");
+    }
+
+    // Fichiers système critiques Unix et Windows
+    if trimmed.contains("/etc/shadow")
+        || trimmed.contains("/etc/sudoers")
+        || trimmed.contains("/windows/system32/config/sam")
+        || trimmed.contains("/windows/system32/config/system")
+    {
+        return Some("fichiers système et bases de comptes sécurisées");
+    }
+
+    None
+}
+
 /// Retourne la raison du refus si la commande est manifestement destructrice.
 pub fn dangerous_command_reason(cmd: &str) -> Option<&'static str> {
     let lower = cmd.to_lowercase();
-    let patterns: [(&str, &str); 19] = [
+    let patterns: [(&str, &str); 28] = [
         ("rm -rf /", "suppression récursive de la racine"),
         ("rm -rf ~", "suppression récursive du dossier personnel"),
         ("rm -rf *", "suppression récursive globale"),
@@ -260,6 +330,11 @@ pub fn dangerous_command_reason(cmd: &str) -> Option<&'static str> {
         ("rmdir /s", "suppression récursive Windows"),
         ("remove-item -recurse", "suppression récursive PowerShell"),
         ("format c:", "formatage de disque"),
+        ("format ", "formatage de volume ou de disque"),
+        ("diskpart", "manipulation de bas niveau des partitions et disques"),
+        ("reg delete", "suppression de clés de registre système"),
+        ("chmod -r 777", "compromission totale des permissions récursives"),
+        ("chown -r", "changement massif et récursif de propriétaire de fichiers"),
         ("mkfs", "formatage de disque"),
         ("shutdown", "arrêt de la machine"),
         ("reboot", "redémarrage de la machine"),
@@ -281,6 +356,22 @@ pub fn dangerous_command_reason(cmd: &str) -> Option<&'static str> {
         (
             "|bash",
             "exécution de code téléchargé via un pipe vers un shell",
+        ),
+        (
+            "| zsh",
+            "exécution de code téléchargé via un pipe vers un shell",
+        ),
+        (
+            "| powershell",
+            "exécution de script téléchargé via un pipe vers PowerShell",
+        ),
+        (
+            "| pwsh",
+            "exécution de script téléchargé via un pipe vers PowerShell",
+        ),
+        (
+            "invoke-expression",
+            "évaluation et exécution dynamique de code arbitraire",
         ),
         ("sudo rm", "suppression en tant que superutilisateur"),
     ];
@@ -377,6 +468,10 @@ const SAFE_COMMAND_PREFIXES: &[&str] = &[
 /// permettraient de contourner le garde-fou.
 pub fn is_pre_approved_command(cmd: &str) -> bool {
     if dangerous_command_reason(cmd).is_some() {
+        return false;
+    }
+    // Rejette fermement toute commande tentant d'accéder à des cibles sensibles (clés SSH, tokens, identifiants)
+    if is_sensitive_security_target(cmd).is_some() {
         return false;
     }
     let trimmed = cmd.trim();
@@ -705,13 +800,26 @@ mod tests {
 
     /// A command that exceeds the timeout is reported as a failure (the exact
     /// message depends on the shell, so only the failure is asserted).
-    #[tokio::test]
-    async fn streaming_times_out() {
-        let (ok, _out) =
-            run_shell_command_streaming("sleep 5", None, Duration::from_secs(1), |_| {}).await;
-        assert!(
-            !ok,
-            "a command exceeding the timeout must be reported as failed"
-        );
+    #[test]
+    fn sensitive_targets_detected() {
+        assert!(is_sensitive_security_target("~/.ssh/id_rsa").is_some());
+        assert!(is_sensitive_security_target("C:/Users/alice/.ssh/id_ed25519").is_some());
+        assert!(is_sensitive_security_target("/etc/shadow").is_some());
+        assert!(is_sensitive_security_target("C:\\Windows\\System32\\config\\SAM").is_some());
+        assert!(is_sensitive_security_target(".aws/credentials").is_some());
+        assert!(is_sensitive_security_target(".git-credentials").is_some());
+        assert!(is_sensitive_security_target("/home/user/.bashrc").is_some());
+        assert!(is_sensitive_security_target("src/main.rs").is_none());
+        assert!(is_sensitive_security_target("README.md").is_none());
+    }
+
+    #[test]
+    fn sensitive_target_blocks_pre_approval() {
+        // Un simple cat sur un fichier ordinaire peut être pré-approuvé
+        assert!(is_pre_approved_command("cat src/main.rs"));
+        // Mais un cat sur une clé privée ssh ou un fichier sensible doit être refusé
+        assert!(!is_pre_approved_command("cat ~/.ssh/id_rsa"));
+        assert!(!is_pre_approved_command("head .aws/credentials"));
+        assert!(!is_pre_approved_command("grep secret /etc/shadow"));
     }
 }

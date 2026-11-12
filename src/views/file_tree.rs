@@ -89,7 +89,7 @@ fn toggle_context_path(mut context_paths: Writable<Vec<PathBuf>>, path: PathBuf)
     }
 }
 
-/// Renders the compact `+` (or `✓` when already pinned) context action badge on a tree row.
+/// Renders a compact context action badge (`+` or `✓` when pinned) on a tree row.
 fn render_context_toggle_badge(
     is_pinned: bool,
     colors: &ColorsSheet,
@@ -97,14 +97,14 @@ fn render_context_toggle_badge(
 ) -> Element {
     let (bg, border_col, fg, symbol) = if is_pinned {
         (
-            Color::from_argb(45, 16, 185, 129),
-            Color::from_rgb(16, 185, 129),
-            Color::from_rgb(74, 222, 128),
+            Color::from_argb(45, 234, 88, 12),
+            Color::from_rgb(234, 88, 12),
+            Color::from_rgb(251, 146, 60),
             "✓",
         )
     } else {
         (
-            colors.surface_tertiary,
+            Color::TRANSPARENT,
             colors.border,
             colors.text_secondary,
             "+",
@@ -112,18 +112,20 @@ fn render_context_toggle_badge(
     };
 
     rect()
-        .width(Size::px(20.))
-        .height(Size::px(20.))
+        .width(Size::px(18.))
+        .height(Size::px(18.))
         .background(bg)
         .border(Border::new().fill(border_col).width(1.))
-        .corner_radius(5.)
+        .corner_radius(3.)
         .center()
+        .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+        .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
         .on_press(on_press)
         .child(
             label()
                 .text(symbol)
                 .color(fg)
-                .font_size(11.5)
+                .font_size(11.)
                 .font_weight(FontWeight::BOLD),
         )
         .into_element()
@@ -141,8 +143,11 @@ pub fn file_tree_panel(
     pending_diffs: Readable<Vec<PendingDiff>>,
     colors: ColorsSheet,
     on_open_file: impl Fn(PathBuf) + Clone + 'static,
+    mut show_sidebar: Writable<bool>,
 ) -> impl IntoElement {
     let cache = use_hook(|| Rc::new(RefCell::new(FileTreeCache::default())));
+    let filter_text = use_state(String::new);
+    let show_hidden = use_state(|| false);
 
     let dir = current_dir.read().clone();
     let expanded_snapshot = expanded.read().clone();
@@ -151,12 +156,17 @@ pub fn file_tree_panel(
     cache.borrow_mut().sync_root(&dir);
 
     let c = colors;
+    let query = filter_text.read().clone();
+    let is_hidden_visible = *show_hidden.read();
+
     let rows = build_tree_rows(
         &dir,
         0,
         &expanded_snapshot,
         &pinned_snapshot,
         &diff_badges,
+        &query,
+        is_hidden_visible,
         expanded.clone(),
         context_paths.clone(),
         cache.clone(),
@@ -187,13 +197,9 @@ pub fn file_tree_panel(
         }
     };
 
-    let refresh_tree = {
-        let cache = cache.clone();
-        let mut expanded = expanded;
-        move |_| {
-            cache.borrow_mut().clear();
-            let _ = expanded.write();
-        }
+    let mut toggle_hidden_state = show_hidden;
+    let toggle_hidden = move |_| {
+        *toggle_hidden_state.write() = !is_hidden_visible;
     };
 
     rect()
@@ -225,8 +231,10 @@ pub fn file_tree_panel(
                         .height(Size::px(20.))
                         .background(c.surface_tertiary)
                         .border(Border::new().fill(c.border).width(1.))
-                        .corner_radius(5.)
+                        .corner_radius(3.)
                         .center()
+                        .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                        .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                         .on_press(go_parent_dir)
                         .child(
                             label()
@@ -243,14 +251,69 @@ pub fn file_tree_panel(
                         .height(Size::px(20.))
                         .background(c.surface_tertiary)
                         .border(Border::new().fill(c.border).width(1.))
-                        .corner_radius(5.)
+                        .corner_radius(3.)
                         .center()
-                        .on_press(refresh_tree)
+                        .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                        .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
+                        .on_press(move |_| {
+                            *show_sidebar.write() = false;
+                        })
                         .child(
                             label()
-                                .text("↻")
+                                .text("◀")
                                 .color(c.text_secondary)
-                                .font_size(11.5)
+                                .font_size(10.)
+                                .font_weight(FontWeight::BOLD),
+                        ),
+                ),
+        )
+        .child(
+            // Filter / search bar
+            rect()
+                .width(Size::fill())
+                .height(Size::px(32.))
+                .padding(Gaps::new(3., 8., 3., 8.))
+                .background(c.surface_primary)
+                .border(Border::new().fill(c.border).width(BorderWidth {
+                    top: 0.,
+                    right: 1.,
+                    bottom: 1.,
+                    left: 0.,
+                }))
+                .horizontal()
+                .cross_align(Alignment::Center)
+                .spacing(6.)
+                .child(
+                    Input::new(filter_text)
+                        .placeholder("Filtrer...")
+                        .background(c.surface_secondary)
+                        .focus_background(c.surface_tertiary)
+                        .border_fill(c.border)
+                        .color(c.text_primary)
+                        .width(Size::flex(1.)),
+                )
+                .child(
+                    rect()
+                        .padding(Gaps::new(2., 6., 2., 6.))
+                        .background(if is_hidden_visible {
+                            Color::from_argb(40, 234, 88, 12)
+                        } else {
+                            c.surface_secondary
+                        })
+                        .border(Border::new().fill(c.border).width(1.))
+                        .corner_radius(3.)
+                        .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                        .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
+                        .on_press(toggle_hidden)
+                        .child(
+                            label()
+                                .text(".*")
+                                .color(if is_hidden_visible {
+                                    Color::from_rgb(251, 146, 60)
+                                } else {
+                                    c.text_secondary
+                                })
+                                .font_size(10.5)
                                 .font_weight(FontWeight::BOLD),
                         ),
                 ),
@@ -279,6 +342,8 @@ fn build_tree_rows(
     expanded_snapshot: &HashSet<PathBuf>,
     pinned_snapshot: &HashSet<PathBuf>,
     diff_badges: &PendingDiffBadges,
+    query: &str,
+    show_hidden: bool,
     expanded: Writable<HashSet<PathBuf>>,
     context_paths: Writable<Vec<PathBuf>>,
     cache: Rc<RefCell<FileTreeCache>>,
@@ -291,11 +356,22 @@ fn build_tree_rows(
 
     let listing = cache.borrow_mut().get_or_scan(dir);
     let mut rows = Vec::with_capacity(listing.entries.len() + 1);
+    let query_lower = query.to_lowercase();
 
     for entry in listing.entries {
+        let is_pinned = pinned_snapshot.contains(&entry.path);
+        if !show_hidden && entry.name.starts_with('.') && !is_pinned {
+            continue;
+        }
+        if !query_lower.is_empty()
+            && !entry.name.to_lowercase().contains(&query_lower)
+            && !is_pinned
+        {
+            continue;
+        }
+
         let indent = depth as f32 * 14.;
         let row_key = entry.path.to_string_lossy().to_string();
-        let is_pinned = pinned_snapshot.contains(&entry.path);
 
         if entry.is_dir {
             let is_expanded = expanded_snapshot.contains(&entry.path);
@@ -326,7 +402,7 @@ fn build_tree_rows(
             let arrow = if is_expanded { "▾" } else { "▸" };
             let icon = if is_expanded { "📂" } else { "📁" };
             let text_col = if is_pinned {
-                Color::from_rgb(74, 222, 128)
+                Color::from_rgb(251, 146, 60)
             } else if is_heavy {
                 colors.text_secondary
             } else {
@@ -338,9 +414,9 @@ fn build_tree_rows(
                     .key(&row_key)
                     .width(Size::fill())
                     .padding(Gaps::new(2., 6., 2., indent + 4.))
-                    .corner_radius(5.)
+                    .corner_radius(4.)
                     .background(if is_pinned {
-                        Color::from_argb(24, 16, 185, 129)
+                        Color::from_argb(24, 234, 88, 12)
                     } else if is_expanded {
                         Color::from_argb(18, 255, 255, 255)
                     } else {
@@ -357,6 +433,8 @@ fn build_tree_rows(
                             .horizontal()
                             .cross_align(Alignment::Center)
                             .spacing(6.)
+                            .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                            .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                             .on_press(toggle)
                             .child(
                                 label()
@@ -394,6 +472,8 @@ fn build_tree_rows(
                     expanded_snapshot,
                     pinned_snapshot,
                     diff_badges,
+                    query,
+                    show_hidden,
                     expanded.clone(),
                     context_paths.clone(),
                     cache.clone(),
@@ -418,7 +498,7 @@ fn build_tree_rows(
             };
 
             let file_text_col = if is_pinned {
-                Color::from_rgb(74, 222, 128)
+                Color::from_rgb(251, 146, 60)
             } else if let Some(dot_col) = file_dot {
                 dot_col
             } else {
@@ -430,9 +510,9 @@ fn build_tree_rows(
                     .key(&row_key)
                     .width(Size::fill())
                     .padding(Gaps::new(1., 6., 1., indent + 18.))
-                    .corner_radius(5.)
+                    .corner_radius(4.)
                     .background(if is_pinned {
-                        Color::from_argb(24, 16, 185, 129)
+                        Color::from_argb(24, 234, 88, 12)
                     } else {
                         Color::TRANSPARENT
                     })
@@ -447,6 +527,8 @@ fn build_tree_rows(
                             .horizontal()
                             .cross_align(Alignment::Center)
                             .spacing(6.)
+                            .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                            .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                             .on_press(open_click)
                             .child(
                                 label()

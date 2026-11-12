@@ -119,31 +119,31 @@ impl RawColors {
 /// or not the file is present.
 fn fallback_colors() -> ColorsSheet {
     ColorsSheet {
-        primary: Color::from_rgb(103, 80, 164),
-        secondary: Color::from_rgb(202, 193, 227),
-        tertiary: Color::from_rgb(79, 61, 130),
-        success: Color::from_rgb(129, 199, 132),
-        warning: Color::from_rgb(255, 200, 120),
-        error: Color::from_rgb(229, 115, 115),
-        info: Color::from_rgb(100, 181, 246),
-        background: Color::from_rgb(30, 30, 30),
-        surface_primary: Color::from_rgb(40, 40, 40),
-        surface_secondary: Color::from_rgb(20, 20, 20),
-        surface_tertiary: Color::from_rgb(65, 65, 65),
-        surface_inverse: Color::from_rgb(45, 55, 70),
-        surface_inverse_secondary: Color::from_rgb(25, 25, 35),
-        surface_inverse_tertiary: Color::from_rgb(60, 60, 70),
-        border: Color::from_rgb(55, 55, 55),
-        border_focus: Color::from_rgb(110, 110, 110),
-        border_disabled: Color::from_rgb(80, 80, 80),
-        text_primary: Color::from_rgb(245, 245, 245),
-        text_secondary: Color::from_rgb(200, 200, 200),
-        text_placeholder: Color::from_rgb(150, 150, 160),
-        text_inverse: Color::from_rgb(220, 220, 230),
-        text_highlight: Color::from_rgb(180, 180, 190),
-        focus: Color::from_rgb(100, 100, 120),
-        active: Color::from_rgb(70, 70, 70),
-        disabled: Color::from_rgb(50, 50, 50),
+        primary: Color::from_rgb(234, 88, 12),     // Rust Orange
+        secondary: Color::from_rgb(161, 161, 170), // Zinc 400
+        tertiary: Color::from_rgb(39, 39, 42),     // Zinc 800
+        success: Color::from_rgb(34, 197, 94),     // Emerald
+        warning: Color::from_rgb(245, 158, 11),    // Amber
+        error: Color::from_rgb(239, 68, 68),       // Rose Red
+        info: Color::from_rgb(59, 130, 246),       // Electric Blue
+        background: Color::from_rgb(9, 9, 11),     // Zinc 950
+        surface_primary: Color::from_rgb(17, 17, 20),
+        surface_secondary: Color::from_rgb(24, 24, 27), // Zinc 900
+        surface_tertiary: Color::from_rgb(39, 39, 42),  // Zinc 800
+        surface_inverse: Color::from_rgb(39, 39, 42),
+        surface_inverse_secondary: Color::from_rgb(20, 20, 23),
+        surface_inverse_tertiary: Color::from_rgb(63, 63, 70),
+        border: Color::from_rgb(39, 39, 42),
+        border_focus: Color::from_rgb(234, 88, 12),
+        border_disabled: Color::from_rgb(30, 30, 33),
+        text_primary: Color::from_rgb(250, 250, 250),
+        text_secondary: Color::from_rgb(161, 161, 170),
+        text_placeholder: Color::from_rgb(113, 113, 122),
+        text_inverse: Color::from_rgb(255, 255, 255),
+        text_highlight: Color::from_rgb(250, 250, 250),
+        focus: Color::from_rgb(234, 88, 12),
+        active: Color::from_rgb(45, 45, 50),
+        disabled: Color::from_rgb(25, 25, 28),
         overlay: Color::from_argb(180, 0, 0, 0),
         shadow: Color::from_argb(120, 0, 0, 0),
     }

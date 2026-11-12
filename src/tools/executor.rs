@@ -4,8 +4,8 @@ use super::approval::request_command_approval;
 use super::definitions::ToolResult;
 use super::extract::{extract_files_from_args, extract_files_from_raw_str};
 use super::fs::{
-    dangerous_command_reason, is_pre_approved_command, resolve_tool_path, run_shell_command,
-    search_dir_recursive, truncate_output,
+    dangerous_command_reason, is_pre_approved_command, is_sensitive_security_target,
+    resolve_tool_path, run_shell_command, search_dir_recursive, truncate_output,
 };
 use super::plan::{ensure_plan_in_gitignore, normalize_spec_questions};
 use super::verify::{run_verification, stage_file};
@@ -120,6 +120,26 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .unwrap_or("");
             let path_str = resolve_tool_path(raw_path);
 
+            if let Some(reason) = is_sensitive_security_target(&path_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Exploration refusée pour raison de sécurité : dossier protégé ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
+
+            if let Some(reason) = is_sensitive_security_target(&path_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Accès refusé pour raison de sécurité : tentative de lecture protégée ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
+
             if path_str.trim().is_empty() {
                 return ToolResult {
                     content: "Erreur: argument 'path' manquant.".to_string(),
@@ -213,6 +233,16 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
             };
             let new_content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
+            if let Some(reason) = is_sensitive_security_target(&path_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Écriture refusée pour raison de sécurité : tentative de modification d'un emplacement sensible ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
+
             let p = Path::new(&path_str);
             if let Some(parent) = p.parent()
                 && !parent.as_os_str().is_empty()
@@ -286,6 +316,16 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
 
             let path_str = resolve_tool_path(target_raw_path);
 
+            if let Some(reason) = is_sensitive_security_target(&path_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Écriture refusée pour raison de sécurité : tentative de création/écrasement d'un fichier sensible ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
+
             if path_str.trim().is_empty() {
                 let serialized = serde_json::to_string(&args).unwrap_or_default();
                 return ToolResult {
@@ -346,6 +386,16 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let path_str = resolve_tool_path(raw_path);
+
+            if let Some(reason) = is_sensitive_security_target(&path_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Exploration refusée pour raison de sécurité : dossier protégé ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
             let target = ["target", "old_string", "old", "find", "search"]
                 .iter()
                 .find_map(|k| args.get(*k).and_then(|v| v.as_str()))
@@ -443,6 +493,16 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
             let path_str = resolve_tool_path(raw_path);
+
+            if let Some(reason) = is_sensitive_security_target(&path_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Exploration refusée pour raison de sécurité : dossier protégé ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
             let filter_str = args
                 .get("filter")
                 .or_else(|| args.get("pattern"))
@@ -568,6 +628,17 @@ pub async fn execute_native_tool(name: &str, args: Value) -> ToolResult {
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
             let dir_str = resolve_tool_path(raw_dir);
+
+            if let Some(reason) = is_sensitive_security_target(&dir_str) {
+                return ToolResult {
+                    content: format!(
+                        "⛔ Recherche refusée pour raison de sécurité : répertoire protégé ({}).",
+                        reason
+                    ),
+                    pending_diff: None,
+                };
+            }
+
             let dir_path = Path::new(&dir_str);
 
             if !dir_path.exists() {

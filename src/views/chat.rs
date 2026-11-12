@@ -53,6 +53,9 @@ pub fn chat_panel(
         on_send_click(text);
     };
 
+    let on_send_starter = on_send.clone();
+    let has_no_messages = messages.read().is_empty();
+
     // Chat scrollable area
     let mut user_scrolled_wheel = diff_review.user_scrolled_up;
     let chat_area = rect()
@@ -64,10 +67,59 @@ pub fn chat_panel(
             }
         })
         .child(
-            ScrollView::new_controlled(diff_review.chat_scroll).child(
-            rect().width(Size::fill()).padding(16.).children(
-                messages.read().iter().map(|msg| {
-                let is_user = msg.role == Role::User;
+            if has_no_messages {
+                rect()
+                    .expanded()
+                    .center()
+                    .padding(16.)
+                    .child(
+                        ui::col(14.)
+                            .width(Size::fill())
+                            .cross_align(Alignment::Center)
+                            .child(
+                                ui::col(4.)
+                                    .cross_align(Alignment::Center)
+                                    .child(ui::mono("RustAgent", 18., c.text_primary))
+                                    .child(ui::subtitle("Architecture, sécurité et refactoring assistés", &c)),
+                            )
+                            .child(
+                                ui::col(6.)
+                                    .width(Size::fill())
+                                    .child({
+                                        let mut s = on_send_starter.clone();
+                                        starter_row(&c, "shield", "1. Audit OWASP (Security by Design)", "Injection, secrets, gestion des erreurs", move || {
+                                            s("Audite la sécurité du projet selon les principes Security by Design (OWASP, validation des entrées, contrôle des erreurs, gestion des secrets). Rédige ton rapport d'audit directement dans la conversation (sans créer de fichier).".to_string())
+                                        })
+                                    })
+                                    .child({
+                                        let mut s = on_send_starter.clone();
+                                        starter_row(&c, "cpu", "2. Mémoire & ownership", "Fuites, concurrence, lifecycles", move || {
+                                            s("Vérifie la gestion mémoire, les fuites potentielles, la concurrence et les règles d'ownership dans le projet.".to_string())
+                                        })
+                                    })
+                                    .child({
+                                        let mut s = on_send_starter.clone();
+                                        starter_row(&c, "file", "3. Cadrer une feature (plan.md)", "Spécification guidée par questions", move || {
+                                            s("Passe en Mode Spec et pose-moi les questions rapides pour formaliser un cadrage d'architecture plan.md pour ce projet.".to_string())
+                                        })
+                                    })
+                                    .child({
+                                        let mut s = on_send_starter.clone();
+                                        starter_row(&c, "blocks", "4. Refactoring modulaire", "Découpage, typage et séparation", move || {
+                                            s("Analyse la structure des fichiers du projet et propose un refactoring propre, modulaire et typé sans casser l'existant.".to_string())
+                                        })
+                                    }),
+                            ),
+                    )
+                    .into_element()
+                } else {
+                    ScrollView::new_controlled(diff_review.chat_scroll).child({
+                    rect()
+                        .width(Size::fill())
+                        .padding(16.)
+                        .children(
+                            messages.read().iter().map(|msg| {
+                            let is_user = msg.role == Role::User;
                 let bg_color = if is_user {
                     c.surface_inverse
                 } else {
@@ -117,7 +169,7 @@ pub fn chat_panel(
                             .into_element()
                     } else if clean_text.is_empty() && spec_payload.is_none() {
                         label()
-                            .text("⏳ En attente de l'assistant...")
+                            .text("En attente de réponse...")
                             .color(c.text_placeholder)
                             .into_element()
                     } else if !clean_text.is_empty() {
@@ -126,7 +178,7 @@ pub fn chat_panel(
                             .into_element()
                     } else {
                         label()
-                            .text("🛡️ Cadrage des spécifications :")
+                            .text("Spécifications requises :")
                             .color(text_color)
                             .into_element()
                     });
@@ -140,29 +192,29 @@ pub fn chat_panel(
                             .width(Size::fill())
                             .padding(12.)
                             .background(c.surface_primary)
-                            .corner_radius(10.)
-                            .border(Border::new().fill(Color::from_rgb(16, 185, 129)).width(1.))
+                            .corner_radius(8.)
+                            .border(Border::new().fill(c.border).width(1.))
                             .spacing(8.)
                             .child(
                                 label()
-                                    .text("🛡️ Fonctionnalité complexe détectée — Spécification Security by Design recommandée")
+                                    .text("Spécification préalable recommandée pour cette fonctionnalité")
                                     .color(c.text_primary)
                                     .font_size(12.),
                             )
                             .child(
                                 Button::new()
                                     .cursor_icon(CursorIcon::Pointer)
-                                    .background(Color::from_rgb(16, 185, 129))
-                                    .hover_background(Color::from_rgb(5, 150, 105))
-                                    .border_fill(Color::TRANSPARENT)
-                                    .color(Color::WHITE)
+                                    .background(c.surface_tertiary)
+                                    .hover_background(c.tertiary)
+                                    .border_fill(c.border)
+                                    .color(c.text_primary)
                                     .on_press(move |_| {
                                         *is_spec_mode_btn.write() = true;
                                         on_send_spec(
-                                            "Passe en Mode Spec et pose-moi les questions rapides de spécification (Security by Design) pour cadrer cette fonctionnalité avant de générer plan.md et le code.".to_string(),
+                                            "Passe en Mode Spec et pose-moi les questions rapides de spécification pour cadrer cette fonctionnalité avant de générer plan.md et le code.".to_string(),
                                         );
                                     })
-                                    .child("🛡️ Passer en Mode Spec et spécifier maintenant"),
+                                    .child("Passer en Mode Spec"),
                             ),
                     );
                 }
@@ -181,7 +233,7 @@ pub fn chat_panel(
                         .spacing(10.)
                         .child(
                             label()
-                                .text("🛡️ Spécification Rapide — Security by Design")
+                                .text("◈ Spécification Rapide — Security by Design")
                                 .color(c.text_primary)
                                 .font_size(13.),
                         );
@@ -358,13 +410,16 @@ pub fn chat_panel(
                     .margin(8.)
                     .cross_align(align)
                     .child(bubble)
-            }),
-        ).child(
-            rect()
-                .width(Size::fill())
-                .margin(8.)
-                .child(changed_files_review_box(diff_review, c.clone())),
-        )),
+            })
+            ).child(
+                rect()
+                    .width(Size::fill())
+                    .margin(8.)
+                    .child(changed_files_review_box(diff_review, c.clone())),
+            ).into_element()
+        })
+            .into_element()
+        }
     );
 
     let active_model = settings_model_input.read().clone();
@@ -401,14 +456,11 @@ pub fn chat_panel(
     });
 
     let model_select = ui::select(
-        format!(
-            "🤖 {}",
-            if active_model.is_empty() {
-                "Choisir modèle"
-            } else {
-                &active_model
-            }
-        ),
+        if active_model.is_empty() {
+            "modèle: auto".to_string()
+        } else {
+            active_model.clone()
+        },
         model_items,
         &c,
     );
@@ -440,29 +492,59 @@ pub fn chat_panel(
     );
 
     let mut is_generating_stop = is_generating;
-    let stop_button = ui::btn_sm("⏹ Arrêter", Tone::Danger, &c, move |_| {
+    let stop_button = ui::btn_sm("Arrêter", Tone::Danger, &c, move |_| {
         api::request_cancel();
         *is_generating_stop.write() = false;
     });
 
-    let mode_toggle_button = {
-        let mut is_spec_mode = is_spec_mode;
-        ui::btn_sm(
-            if is_spec_val {
-                "🛡️ Mode Spec"
-            } else {
-                "⚡ Quick Edit"
-            },
-            if is_spec_val {
-                Tone::Success
-            } else {
-                Tone::Neutral
-            },
-            &c,
-            move |_| {
-                *is_spec_mode.write() = !is_spec_val;
-            },
-        )
+    let mode_segmented_control = {
+        let is_spec_val = is_spec_val;
+        rect()
+            .horizontal()
+            .cross_align(Alignment::Center)
+            .background(c.surface_secondary)
+            .corner_radius(4.)
+            .border(Border::new().fill(c.border).width(1.))
+            .padding(Gaps::new(2., 2., 2., 2.))
+            .spacing(2.)
+            .child(
+                rect()
+                    .padding(Gaps::new(3., 6., 3., 6.))
+                    .background(if !is_spec_val { c.surface_tertiary } else { Color::TRANSPARENT })
+                    .corner_radius(3.)
+                    .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                    .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
+                    .on_press({
+                        let mut is_spec_mode = is_spec_mode.clone();
+                        move |_| { *is_spec_mode.write() = false; }
+                    })
+                    .child(
+                        label()
+                            .text("Edit")
+                            .color(if !is_spec_val { c.text_primary } else { c.text_secondary })
+                            .font_size(11.5)
+                            .font_weight(if !is_spec_val { FontWeight::BOLD } else { FontWeight::NORMAL }),
+                    ),
+            )
+            .child(
+                rect()
+                    .padding(Gaps::new(3., 6., 3., 6.))
+                    .background(if is_spec_val { c.primary } else { Color::TRANSPARENT })
+                    .corner_radius(3.)
+                    .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                    .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
+                    .on_press({
+                        let mut is_spec_mode = is_spec_mode.clone();
+                        move |_| { *is_spec_mode.write() = true; }
+                    })
+                    .child(
+                        label()
+                            .text("Spec")
+                            .color(if is_spec_val { Color::WHITE } else { c.text_secondary })
+                            .font_size(11.5)
+                            .font_weight(if is_spec_val { FontWeight::BOLD } else { FontWeight::NORMAL }),
+                    ),
+            )
     };
 
     let pinned_list = context_paths.read().clone();
@@ -488,6 +570,8 @@ pub fn chat_panel(
                     .horizontal()
                     .cross_align(Alignment::Center)
                     .spacing(5.)
+                    .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                    .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                     .on_press(move |_| {
                         context_paths.write().retain(|item| item != &path_clone);
                     })
@@ -542,6 +626,8 @@ pub fn chat_panel(
                             .padding(Gaps::new(2., 6., 2., 6.))
                             .background(c.surface_tertiary)
                             .corner_radius(4.)
+                            .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                            .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                             .on_press(clear_all_pinned)
                             .child(
                                 label()
@@ -596,6 +682,8 @@ pub fn chat_panel(
                     .cross_align(Alignment::Center)
                     .content(Content::Flex)
                     .spacing(8.)
+                    .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                    .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                     .on_press(move |_| {
                         let cur = input_value.read().clone();
                         let updated = file_tree::replace_active_at_query(&cur, &rel_path);
@@ -659,6 +747,8 @@ pub fn chat_panel(
                             .padding(Gaps::new(2., 6., 2., 6.))
                             .background(c.surface_tertiary)
                             .corner_radius(4.)
+                            .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                            .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                             .on_press(refresh_index)
                             .child(
                                 label()
@@ -677,6 +767,8 @@ pub fn chat_panel(
     };
 
     // Input area with text input and model selector bar
+    let _ = (&project_name, &current_file_display);
+    let mut ctx_input = input_value.clone();
     let input_area = rect()
         .key("chat_input_area")
         .width(Size::fill())
@@ -705,9 +797,9 @@ pub fn chat_panel(
                         .border_fill(c.border)
                         .color(c.text_secondary)
                         .placeholder(if is_spec_val {
-                            "🛡️ Mode Spec : décrivez la fonctionnalité (tapez @ pour cibler un fichier/dossier)..."
+                            "Décrivez une fonctionnalité à spécifier (tapez @ pour cibler)..."
                         } else {
-                            "⚡ Quick Edit : décrivez la modification (tapez @ pour cibler un fichier/dossier)..."
+                            "Posez une question ou décrivez une modification (tapez @ pour cibler)..."
                         })
                         .width(Size::flex(1.))
                         .on_submit(on_submit_handler),
@@ -736,14 +828,26 @@ pub fn chat_panel(
                 .height(Size::px(38.))
                 .child(model_select)
                 .child(refresh_models_button)
-                .child(mode_toggle_button)
+                .child(mode_segmented_control)
                 .child(
                     ui::row(4.)
                         .width(Size::flex(1.))
                         .main_align(Alignment::End)
-                        .child(ui::muted(
-                            format!("📁 {}  ·  📄 {}", project_name, current_file_display),
+                        .child(ui::btn_sm(
+                            if has_pinned {
+                                format!("+ @ ({})", pinned_list.len())
+                            } else {
+                                "+ @".to_string()
+                            },
+                            Tone::Subtle,
                             &c,
+                            move |_| {
+                                let mut cur = ctx_input.read().clone();
+                                if !cur.ends_with('@') {
+                                    cur.push('@');
+                                }
+                                *ctx_input.write() = cur;
+                            },
                         )),
                 ),
         );
@@ -755,4 +859,34 @@ pub fn chat_panel(
         .child(chat_area.key("chat_messages_area"))
         .child(at_mention_popup)
         .child(input_area)
+}
+
+/// Compact starter row (icon, title, one-line hint) adapting responsively to any panel width.
+fn starter_row(
+    c: &ColorsSheet,
+    icon: &'static str,
+    title: &'static str,
+    hint: &'static str,
+    mut on_press: impl FnMut() + 'static,
+) -> Rect {
+    ui::clickable(
+        rect()
+            .width(Size::fill())
+            .padding(Gaps::new(8., 12., 8., 12.))
+            .background(c.surface_primary)
+            .corner_radius(6.)
+            .border(Border::new().fill(c.border).width(1.))
+            .horizontal()
+            .cross_align(Alignment::Center)
+            .content(Content::Flex)
+            .spacing(12.)
+            .on_press(move |_| on_press())
+            .child(ui::icon(icon, 15., c.primary))
+            .child(
+                ui::col(2.)
+                    .width(Size::flex(1.))
+                    .child(ui::title(title, c).font_size(12.))
+                    .child(ui::subtitle(hint, c).font_size(10.5)),
+            ),
+    )
 }

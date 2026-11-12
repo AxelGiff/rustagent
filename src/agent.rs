@@ -144,6 +144,7 @@ pub fn build_pinned_context(pinned_paths: &[std::path::PathBuf]) -> String {
 pub fn build_system_prompt(
     spec_mode: bool,
     already_answered_specs: bool,
+    applying_previous_plan: bool,
     env_context: &str,
     active_context: &str,
     plan_context: &str,
@@ -177,14 +178,23 @@ DIRECTIVES DU MODE SPEC (AUTONOME, COMPLET ET ROBUSTE) :
             plan_context
         )
     } else {
+        let plan_continuation_directive = if applying_previous_plan {
+            "\n\n⚡ DIRECTIVE PRIORITAIRE D'EXÉCUTION IMMÉDIATE :
+L'utilisateur a validé l'application du refactoring / plan proposé au tour précédent.
+Toutes les explorations et analyses d'arborescence ont DÉJÀ été effectuées.
+Ne fais AUCUN `list_directory`. Passe IMMÉDIATEMENT à l'implémentation concrète avec `write_file` et `edit_file` pour chaque fichier prévu dans le plan, puis termine par `verify_project` !"
+        } else {
+            ""
+        };
+
         format!(
             "Tu es RustAgent en **⚡ Mode Quick Edit** : un agent de code autonome.
 
 OBJECTIF : réaliser ENTIÈREMENT la demande dans ce tour, avec autant d'appels d'outils que nécessaire. Ne t'arrête PAS après un seul fichier si la demande comporte plusieurs étapes.
 
 DÉMARCHE :
-1. PLANIFIE : commence par `update_tasks` en listant les étapes concrètes (explorer, chaque fichier à créer/modifier, vérifier). Mets à jour `status` après chaque étape (`pending`/`in_progress`/`done`).
-2. EXPLORE : lis le code concerné (`read_file`, `search_files`) AVANT de modifier. Ne DEVINE JAMAIS un extrait.
+1. PLANIFIE : commence par `update_tasks` en listant les étapes concrètes (fichiers à créer/modifier, vérifier). Si le plan a déjà été analysé au tour précédent, ne planifie PAS d'étape d'exploration redondante.
+2. EXPLORE (UNIQUEMENT LORS DU PREMIER CONTACT AVEC LE PROJET) : si et seulement si tu n'as pas encore analysé les fichiers dans la conversation, lis le code concerné (`read_file`, `search_files`) AVANT de modifier. Si les fichiers ont DÉJÀ été analysés au tour précédent, SAUTE CETTE ÉTAPE et commence directement à écrire.
 3. IMPLÉMENTE :
 - Modification ciblée : `edit_file` avec `target` = extrait EXACT copié depuis `read_file`. En cas d'échec, l'erreur renvoie le contenu du fichier : corrige `target` et réessaie.
 - Nouveau fichier : appelle `write_file(path: \"...\", content: \"...\")` avec UN SEUL fichier par appel (`path` et `content` obligatoires). N'utilise JAMAIS de tableau `files`. Crée les fichiers un par un : la boucle agentique enchaîne automatiquement chaque fichier jusqu'à la fin du plan.
@@ -196,9 +206,11 @@ RÈGLES :
 - Sois AUTONOME : n'attends aucune confirmation, n'annonce pas ce que tu vas faire — FAIS-LE.
 - Si un outil échoue, adapte-toi et réessaie dans ce même tour.
 - RÈGLE STRICTE POUR AUDITS ET ANALYSES DE SÉCURITÉ (OWASP) : si la demande est un audit, une analyse ou une revue, explore les fichiers sources du projet en profondeur avec `read_file` et `search_files`, puis rédige ton rapport d'audit COMPLET en Markdown directement dans ta réponse dans la conversation. Ne crée JAMAIS de fichier sur le disque (aucun fichier `.md`, aucun appel à `write_file` ou `edit_file`). L'audit est purement consultatif dans le chat !
+- DIRECTIVE CRITIQUE DE CONTINUATION : Si l'utilisateur confirme ou demande d'appliquer un plan, un audit ou un refactoring déjà analysé au tour précédent (ex: « fais-le », « applique », « vas-y », « ok », « oui ») : NE RE-EXPLORE PAS le projet ! Ne fais AUCUN `list_directory`. Tu as DÉJÀ tous les éléments dans la conversation. Passe DIRECTEMENT à `update_tasks` puis à l'implémentation concrète (`write_file` / `edit_file`), puis lance `verify_project`.
 
 REDIRECTION VERS MODE SPEC (UNIQUEMENT SI ARCHITECTURE COMPLEXE NON SPÉCIFIÉE) :
-- Si l'utilisateur demande une grosse fonctionnalité d'architecture/sécurité floue (> 3 fichiers, auth/permissions complexes) et qu'aucun `plan.md` n'existe : explique en 2 phrases les enjeux Security by Design et termine par `[RECOMMEND_SPEC_MODE]`.{}{}{}",
+- Si l'utilisateur demande une grosse fonctionnalité d'architecture/sécurité floue (> 3 fichiers, auth/permissions complexes) et qu'aucun `plan.md` n'existe : explique en 2 phrases les enjeux Security by Design et termine par `[RECOMMEND_SPEC_MODE]`.{}{}{}{}",
+            plan_continuation_directive,
             env_context,
             active_context,
             plan_context
@@ -337,7 +349,9 @@ pub async fn run_agent_turn(
             .take(4)
             .any(|m| m.content.contains("SPEC_QUESTIONS_JSON:"));
 
-    let is_audit = api::policy::analyze_intent(&lower_prompt, &user_message, "", &history).audit_intent;
+    let turn_intent = api::policy::analyze_intent(&lower_prompt, &user_message, "", &history);
+    let is_audit = turn_intent.audit_intent;
+    let applying_previous_plan = turn_intent.applying_previous_plan;
 
     // `write_auto_plan` écrit sur disque : exécuté hors du runtime async (uniquement hors mode audit).
     let plan_file = if is_audit {
@@ -395,6 +409,7 @@ pub async fn run_agent_turn(
     let system_prompt = build_system_prompt(
         spec_mode,
         already_answered_specs,
+        applying_previous_plan,
         &env_context,
         &active_context,
         &plan_context,

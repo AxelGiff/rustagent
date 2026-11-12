@@ -135,7 +135,16 @@ impl ApiKeyConfig {
         };
         let content = toml::to_string_pretty(&config)
             .map_err(|e| format!("Failed to serialize config: {}", e))?;
-        std::fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))
+        std::fs::write(&path, content).map_err(|e| format!("Failed to write config file: {}", e))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let permissions = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(&path, permissions);
+        }
+
+        Ok(())
     }
 
     /// Validate the Albert API key configuration.

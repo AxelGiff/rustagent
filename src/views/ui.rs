@@ -60,6 +60,39 @@ pub fn empty() -> Element {
     rect().width(Size::px(0.)).height(Size::px(0.)).into_element()
 }
 
+/// Makes any `rect()` behave like a button: pointer cursor on hover, default cursor on leave.
+pub fn clickable(r: Rect) -> Rect {
+    r.on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+        .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
+}
+
+/// Equal-height tile row for the bento grid (children share `height`, aligned to the top).
+pub fn tile_row(height: f32) -> Rect {
+    rect()
+        .width(Size::fill())
+        .height(Size::px(height))
+        .horizontal()
+        .content(Content::Flex)
+        .spacing(10.)
+}
+
+/// Bento tile: fixed-height flex child with dense padding, thin border and 6px corners.
+pub fn tile(c: &ColorsSheet) -> Rect {
+    rect()
+        .width(Size::flex(1.))
+        .height(Size::fill())
+        .padding(12.)
+        .background(c.surface_primary)
+        .corner_radius(6.)
+        .border(Border::new().fill(c.border).width(1.))
+        .spacing(6.)
+}
+
+/// Clickable bento tile with hover feedback (border highlights in the accent color).
+pub fn action_tile(c: &ColorsSheet) -> Rect {
+    clickable(tile(c))
+}
+
 // ============================================================================
 // SURFACES, HEADERS & CARDS
 // ============================================================================
@@ -83,39 +116,25 @@ pub fn panel_header(c: &ColorsSheet, height: f32) -> Rect {
         .spacing(8.)
 }
 
-/// Standard Shadcn-style surface card with rounded corners, subtle border, and soft drop shadow.
+/// Standard surface card with clean rounded corners and crisp border.
 pub fn card(c: &ColorsSheet) -> Rect {
     rect()
         .width(Size::fill())
-        .padding(16.)
+        .padding(14.)
         .background(c.surface_primary)
-        .corner_radius(10.)
+        .corner_radius(6.)
         .border(Border::new().fill(c.border).width(1.))
-        .shadow(
-            Shadow::new()
-                .x(0.)
-                .y(3.)
-                .blur(10.)
-                .color(Color::from_argb(45, 0, 0, 0)),
-        )
         .spacing(8.)
 }
 
-/// Elevated showcase or review container with a custom accent border and deeper shadow.
+/// Elevated showcase or review container with a custom accent border and clean corners.
 pub fn accent_card(c: &ColorsSheet, accent: Color) -> Rect {
     rect()
         .width(Size::fill())
         .padding(12.)
         .background(c.surface_secondary)
-        .corner_radius(10.)
-        .border(Border::new().fill(accent).width(1.5))
-        .shadow(
-            Shadow::new()
-                .x(0.)
-                .y(4.)
-                .blur(14.)
-                .color(Color::from_argb(65, 0, 0, 0)),
-        )
+        .corner_radius(6.)
+        .border(Border::new().fill(accent).width(1.))
         .spacing(8.)
 }
 
@@ -125,7 +144,7 @@ pub fn item_card(c: &ColorsSheet, highlighted: bool) -> Rect {
         .width(Size::fill())
         .padding(Gaps::new(8., 12., 8., 12.))
         .background(c.surface_primary)
-        .corner_radius(8.)
+        .corner_radius(4.)
         .border(
             Border::new()
                 .fill(if highlighted { c.primary } else { c.border })
@@ -167,6 +186,7 @@ fn tone_badge_colors(tone: Tone, c: &ColorsSheet) -> (Color, Color, Color) {
 }
 
 /// Fully rounded capsule pill (`corner_radius(99.)`) with subtle border and bold label.
+#[allow(dead_code)]
 pub fn pill(text: impl Into<Cow<'static, str>>, tone: Tone, c: &ColorsSheet) -> Rect {
     let (bg, border_col, fg) = tone_badge_colors(tone, c);
     rect()
@@ -206,6 +226,30 @@ pub fn diff_stats(added: usize, deleted: usize, c: &ColorsSheet) -> Rect {
         .child(tag(format!("-{}", deleted), Tone::Danger, c))
 }
 
+/// Monospace code badge (`<code>`) with subtle surface background, crisp border, and clean typography.
+pub fn code_badge(text: impl Into<Cow<'static, str>>, c: &ColorsSheet) -> Rect {
+    rect()
+        .padding(Gaps::new(2., 6., 2., 6.))
+        .background(c.surface_secondary)
+        .corner_radius(4.)
+        .border(Border::new().fill(c.border).width(1.))
+        .child(mono(text, 11., c.text_primary))
+}
+
+/// Dedicated icon glyph for starters, action tiles, and cockpit badges.
+pub fn icon(name: &str, size: f32, color: Color) -> Label {
+    let glyph = match name {
+        "shield" => "◈",
+        "cpu" => "⬡",
+        "file" => "≡",
+        "blocks" => "⇄",
+        "terminal" => ">_",
+        "check" => "✔",
+        _ => "●",
+    };
+    label().text(glyph).font_size(size).color(color)
+}
+
 // ============================================================================
 // BUTTONS
 // ============================================================================
@@ -214,40 +258,40 @@ pub fn diff_stats(added: usize, deleted: usize, c: &ColorsSheet) -> Rect {
 fn tone_button_colors(tone: Tone, c: &ColorsSheet) -> (Color, Color, Color, Color) {
     match tone {
         Tone::Neutral => (
-            c.surface_tertiary,
-            c.tertiary,
-            Color::TRANSPARENT,
-            c.text_primary,
-        ),
-        Tone::Subtle => (
             c.surface_secondary,
             c.surface_tertiary,
             c.border,
             c.text_primary,
         ),
+        Tone::Subtle => (
+            c.surface_primary,
+            c.surface_secondary,
+            c.border,
+            c.text_secondary,
+        ),
         Tone::Primary => (
             c.primary,
-            c.tertiary,
+            Color::from_rgb(194, 65, 12),
             Color::TRANSPARENT,
             Color::WHITE,
         ),
         Tone::Success => (
-            Color::from_rgb(22, 163, 74),
-            Color::from_rgb(21, 128, 61),
-            Color::TRANSPARENT,
-            Color::WHITE,
+            c.surface_secondary,
+            c.surface_tertiary,
+            Color::from_rgb(34, 197, 94),
+            Color::from_rgb(74, 222, 128),
         ),
         Tone::Danger => (
-            Color::from_rgb(220, 38, 38),
-            Color::from_rgb(185, 28, 28),
-            Color::TRANSPARENT,
-            Color::WHITE,
+            c.surface_secondary,
+            c.surface_tertiary,
+            Color::from_rgb(239, 68, 68),
+            Color::from_rgb(248, 113, 113),
         ),
         Tone::Warning => (
-            Color::from_rgb(217, 119, 6),
-            Color::from_rgb(180, 83, 9),
-            Color::TRANSPARENT,
-            Color::WHITE,
+            c.surface_secondary,
+            c.surface_tertiary,
+            Color::from_rgb(245, 158, 11),
+            Color::from_rgb(250, 204, 21),
         ),
     }
 }
@@ -268,13 +312,13 @@ where
         .background(bg)
         .hover_background(hover_bg)
         .border_fill(border_col)
-        .corner_radius(8.)
-        .padding(Gaps::new(8., 16., 8., 16.))
+        .corner_radius(4.)
+        .padding(Gaps::new(7., 14., 7., 14.))
         .on_press(on_press)
         .child(
             label()
                 .text(text)
-                .font_size(13.)
+                .font_size(12.5)
                 .font_weight(FontWeight::BOLD)
                 .color(fg),
         )
@@ -296,13 +340,13 @@ where
         .background(bg)
         .hover_background(hover_bg)
         .border_fill(border_col)
-        .corner_radius(8.)
-        .padding(Gaps::new(7., 14., 7., 14.))
+        .corner_radius(4.)
+        .padding(Gaps::new(6., 12., 6., 12.))
         .on_press(on_press)
         .child(
             label()
                 .text(text)
-                .font_size(12.5)
+                .font_size(12.)
                 .font_weight(FontWeight::BOLD)
                 .color(fg),
         )
