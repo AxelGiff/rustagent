@@ -28,6 +28,10 @@ pub struct TurnIntent {
     /// Mutating tools (`write_file`, `edit_file`) are disabled so the audit is answered directly
     /// in the chat without modifying or creating files on disk.
     pub audit_intent: bool,
+    /// L'utilisateur valide ou confirme l'application d'un plan ou refactoring proposé au tour précédent
+    /// (ex: « fais-le », « applique », « vazy », « go », « oui »). Les outils de re-scan (`list_directory`)
+    /// sont désactivés pour aller directement à l'implémentation sans répéter l'exploration.
+    pub applying_previous_plan: bool,
 }
 
 /// Extract the function name from a tool definition JSON value.
@@ -135,15 +139,67 @@ pub fn analyze_intent(
         lower_prompt.contains(k)
     });
 
-    let audit_intent = is_explicit_audit && !has_write_verb;
+    let is_continuation_phrase = [
+        "vazy",
+        "vas-y",
+        "vas y",
+        "fais-le",
+        "fais le",
+        "fait le",
+        "fait-le",
+        "applique",
+        "appliquer",
+        "go",
+        "oui",
+        "ok",
+        "d'accord",
+        "dac",
+        "yes",
+        "lance",
+        "procède",
+        "procede",
+        "c'est parti",
+    ]
+    .iter()
+    .any(|k| {
+        let p = lower_prompt.trim();
+        p == *k
+            || p.starts_with(&format!("{} ", k))
+            || p.starts_with(&format!("{},", k))
+            || p.ends_with(&format!(" {}", k))
+            || p.contains(&format!(" {}", k))
+    });
+
+    let last_ai_message = history.iter().rev().find(|m| m.role == crate::Role::AI);
+    let last_ai_proposed_plan = last_ai_message
+        .map(|m| {
+            let c = m.content.to_lowercase();
+            c.contains("souhaitez que j'applique")
+                || c.contains("rapport de proposition")
+                || c.contains("voulez-vous que")
+                || c.contains("souhaitez-vous que")
+                || c.contains("je migrerai alors")
+                || c.contains("proposer un refactoring")
+                || c.contains("garanties « sans casser")
+                || c.contains("dites-moi si vous souhaitez")
+                || c.contains("aucun fichier n'a été créé")
+                || c.contains("aucun fichier n'a ete cree")
+        })
+        .unwrap_or(false);
+
+    let applying_previous_plan = is_continuation_phrase && last_ai_proposed_plan;
+    let effective_modification_intent = modification_intent || applying_previous_plan;
+
+    let audit_intent = is_explicit_audit && !has_write_verb && !applying_previous_plan;
 
     TurnIntent {
         specs_already_answered,
         project_preloaded,
         wants_terminal_cmd,
         mentions_existing_folder,
-        modification_intent,
+        modification_intent: effective_modification_intent,
         audit_intent,
+        applying_previous_plan,
     }
 }
 
@@ -153,6 +209,12 @@ pub fn select_initial_tools(all: Vec<Value>, intent: &TurnIntent, spec_mode: boo
         .filter(|t| {
             let name = tool_name(t);
             if intent.audit_intent && matches!(name, "write_file" | "edit_file" | "write_plan") {
+                return false;
+            }
+            if intent.applying_previous_plan && matches!(name, "list_directory" | "search_files") {
+                // L'arborescence et les fichiers ont déjà été explorés et validés au tour précédent :
+                // masquer `list_directory` et `search_files` force l'agent à passer directement
+                // à l'implémentation (write_file/edit_file) sans re-scanner inutilement les dossiers.
                 return false;
             }
             if (!spec_mode || intent.specs_already_answered) && name == "ask_spec_questions" {
@@ -165,7 +227,7 @@ pub fn select_initial_tools(all: Vec<Value>, intent: &TurnIntent, spec_mode: boo
                 return false;
             }
             // Les outils d'exploration (list_directory, search_files, read_file)
-            // restent toujours activés pour permettre au modèle d'inspecter l'arborescence.
+            // restent activés pour les autres cas.
             true
         })
         .collect()
@@ -302,5 +364,25 @@ mod tests {
         let names: Vec<&str> = selected.iter().map(tool_name).collect();
         assert!(names.contains(&"read_file"), "names: {:?}", names);
         assert!(names.contains(&"edit_file"), "names: {:?}", names);
+    }
+
+    #[test]
+    fn continuation_approval_disables_list_directory() {
+        let history = vec![crate::Message {
+            role: crate::Role::AI,
+            content: "Dites-moi si vous souhaitez que j'applique ce refactoring (je migrerai alors effectivement les fichiers)."
+                .to_string(),
+        }];
+        let prompt = "vazy fait le";
+        let lower = prompt.to_lowercase();
+        let intent = analyze_intent(&lower, prompt, "", &history);
+        assert!(intent.applying_previous_plan);
+        assert!(intent.modification_intent);
+        let selected = select_initial_tools(crate::tools::get_tool_definitions(), &intent, false);
+        let names: Vec<&str> = selected.iter().map(tool_name).collect();
+        assert!(!names.contains(&"list_directory"), "list_directory should be excluded");
+        assert!(!names.contains(&"search_files"), "search_files should be excluded");
+        assert!(names.contains(&"write_file"), "write_file should be available");
+        assert!(names.contains(&"edit_file"), "edit_file should be available");
     }
 }

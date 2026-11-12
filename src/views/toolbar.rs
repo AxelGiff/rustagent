@@ -13,6 +13,8 @@ pub fn app_toolbar(
     theme_state: Writable<Theme>,
     show_settings: Writable<bool>,
     companion_mode: Writable<bool>,
+    show_sidebar: Writable<bool>,
+    show_dashboard: Writable<bool>,
     available_models: Writable<Vec<String>>,
     models_loading: Writable<bool>,
     _settings_endpoint_input: Readable<String>,
@@ -45,22 +47,45 @@ pub fn app_toolbar(
 
     let is_comp = *companion_mode.read();
     let mut comp_toggle = companion_mode;
+    let is_sidebar_open = *show_sidebar.read();
+    let mut sidebar_toggle = show_sidebar;
+    let is_dashboard_open = *show_dashboard.read();
+    let mut dashboard_toggle = show_dashboard;
 
-    ui::panel_header(&c, 48.)
+    ui::panel_header(&c, 46.)
         .child(
             ui::row(8.)
-                .child(ui::title("⚡ RustAgent", &c).font_size(15.))
-                .child(ui::pill("Albert API", Tone::Primary, &c))
+                .child(ui::title("RustAgent", &c).font_size(15.))
+                .maybe_child((!is_sidebar_open).then(|| {
+                    ui::btn_sm(
+                        "▶ Explorateur",
+                        Tone::Primary,
+                        &c,
+                        move |_| {
+                            *sidebar_toggle.write() = true;
+                        },
+                    )
+                }))
+                .maybe_child((!is_dashboard_open).then(|| {
+                    ui::btn_sm(
+                        "🎛 Dashboard",
+                        Tone::Primary,
+                        &c,
+                        move |_| {
+                            *dashboard_toggle.write() = true;
+                        },
+                    )
+                }))
                 .child(ui::btn_sm(
-                    if is_comp { "🪟 Mode Compagnon VS Code" } else { "💻 Mode IDE Classique" },
-                    if is_comp { Tone::Primary } else { Tone::Subtle },
+                    if is_comp { "Mode Compagnon" } else { "Mode Classique" },
+                    Tone::Subtle,
                     &c,
                     move |_| {
                         *comp_toggle.write() = !is_comp;
                     },
                 ))
                 .child(ui::btn_sm(
-                    "📂 Ouvrir un projet",
+                    "Ouvrir un dossier",
                     Tone::Subtle,
                     &c,
                     move |_| on_open_project(),
@@ -73,7 +98,7 @@ pub fn app_toolbar(
             &c,
         ))
         .child(ui::btn_sm(
-            "⚙ Paramètres",
+            "Paramètres",
             Tone::Neutral,
             &c,
             {
@@ -102,15 +127,17 @@ pub fn app_toolbar(
             },
         ))
         .child(ui::btn_sm(
-            "🧹 Vider Chat",
+            "Effacer le chat",
             Tone::Neutral,
             &c,
             move |_| on_clear_chat(),
         ))
-        .child(ui::btn_sm(
-            "🔄 Reset Terminal",
-            Tone::Neutral,
-            &c,
-            move |_| on_reset_terminal(),
-        ))
+        .maybe_child((!is_comp).then(|| {
+            ui::btn_sm(
+                "Reset Terminal",
+                Tone::Neutral,
+                &c,
+                move |_| on_reset_terminal(),
+            )
+        }))
 }

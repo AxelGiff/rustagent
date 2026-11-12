@@ -46,19 +46,15 @@ fn app() -> impl IntoElement {
     let current_theme = use_state(|| theme::ThemePreset::ObsidianDark);
     let theme = use_provide_theme(theme::load_theme);
     let c = theme.read().colors.clone();
-    let editor_a11y_id = use_a11y();
 
     let messages = use_state(|| {
         let startup_key_config = config::ApiKeyConfig::load();
         let startup_key_warning = startup_key_config.validate().err();
-        let mut initial = vec![Message {
-            role: Role::AI,
-            content: "👋 Bonjour ! Je suis **RustAgent**, votre assistant de développement propulsé par **Albert API**.\n\nDécrivez une tâche en **⚡ Quick Edit** ou en **🛡️ Mode Spec (Security by Design)** : chaque modification générera une revue de diff interactive que vous pourrez inspecter et valider.".to_string(),
-        }];
+        let mut initial = Vec::new();
         if let Some(warning) = startup_key_warning {
             initial.push(Message {
                 role: Role::AI,
-                content: format!("⚠️ {}\n\nVous pouvez configurer votre clé API via le bouton **Settings** de la barre d'outils, la variable d'environnement `{}`, ou le fichier `{}`.", warning, config::API_KEY_ENV, config::ApiKeyConfig::config_file_path().display()),
+                content: format!("⚠️ {}\n\nConfigurez votre clé API dans les Paramètres ou via la variable `{}`.", warning, config::API_KEY_ENV),
             });
         }
         initial
@@ -79,6 +75,8 @@ fn app() -> impl IntoElement {
     let review_box_expanded = use_state(|| false);
     let split_diff_view = use_state(|| false);
     let companion_mode = use_state(|| true);
+    let show_sidebar = use_state(|| true);
+    let show_dashboard = use_state(|| true);
     let chat_scroll = use_scroll_controller(|| ScrollConfig {
         default_vertical_position: ScrollPosition::End,
         ..Default::default()
@@ -153,7 +151,6 @@ fn app() -> impl IntoElement {
     let current_language = use_state(|| SupportedLanguage::Rust);
     let editor = use_state(|| create_editor_data("", None));
     let file_name = use_state(String::new);
-    let open_tabs = use_state(Vec::<String>::new);
 
     let open_project = {
         let mut current_dir = current_dir;
@@ -189,7 +186,10 @@ fn app() -> impl IntoElement {
         let mut spec_selected_options = spec_selected_options;
         let mut spec_custom_input = spec_custom_input;
         let mut context_paths = context_paths;
+        let mut is_generating = is_generating;
         move || {
+            api::request_cancel();
+            *is_generating.write() = false;
             messages.write().clear();
             pending_diffs.write().clear();
             context_paths.write().clear();
@@ -197,10 +197,6 @@ fn app() -> impl IntoElement {
             *inline_diff_idx.write() = None;
             spec_selected_options.write().clear();
             *spec_custom_input.write() = String::new();
-            messages.write().push(Message {
-                role: Role::AI,
-                content: "Chat cleared. How can I help you?".to_string(),
-            });
         }
     };
 
@@ -478,62 +474,6 @@ fn app() -> impl IntoElement {
         }
     };
 
-    let execute_code = {
-        let mut messages = messages;
-        move || {
-            let code_content = editor.read().rope.to_string();
-            let language = *current_language.read();
-            let Some(terminal_handle) = terminal_handle.read().clone() else {
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: "Terminal is not available. Please reset the terminal.".to_string(),
-                });
-                return;
-            };
-
-            let temp_dir = std::env::temp_dir();
-            let source_path = temp_dir.join(flow::derive_file_name(&code_content, language));
-            if let Err(e) = std::fs::write(&source_path, &code_content) {
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: format!("Failed to write code file: {}", e),
-                });
-                return;
-            }
-
-            let command = language.run_command(&source_path);
-            let _ = terminal_handle.write(command.as_bytes());
-
-            messages.write().push(Message {
-                role: Role::AI,
-                content: format!(
-                    "Code execution started in the terminal ({}).",
-                    flow::language_name(language)
-                ),
-            });
-        }
-    };
-
-    let save_file = {
-        let mut messages = messages;
-        move || {
-            let path_str = file_name.read().clone();
-            let code_content = editor.read().rope.to_string();
-            let path = std::path::Path::new(&path_str);
-            if let Err(e) = std::fs::write(path, &code_content) {
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: format!("⚠️ Erreur lors de la sauvegarde de `{}` : {}", path_str, e),
-                });
-            } else {
-                messages.write().push(Message {
-                    role: Role::AI,
-                    content: format!("💾 Fichier `{}` sauvegardé sur le disque.", path_str),
-                });
-            }
-        }
-    };
-
     let project_name = current_dir
         .read()
         .file_name()
@@ -558,10 +498,6 @@ fn app() -> impl IntoElement {
         diff_viewer_panel(diff_review, c.clone()).into_element()
     } else {
         code_editor_panel(
-            editor.into(),
-            current_language.into_writable(),
-            file_name.into_writable(),
-            open_tabs.into_writable(),
             current_dir.into(),
             audit_running.into_writable(),
             audit_result.into_writable(),
@@ -576,10 +512,11 @@ fn app() -> impl IntoElement {
                     *center_view_mode.write() = CenterViewMode::Diff;
                 }
             },
-            save_file,
-            execute_code,
             send_text.clone(),
-            editor_a11y_id,
+            show_dashboard.into_writable(),
+            messages.into(),
+            context_paths.into(),
+            clear_chat.clone(),
             c.clone(),
         )
         .into_element()
@@ -613,6 +550,7 @@ fn app() -> impl IntoElement {
         pending_diffs.into(),
         c.clone(),
         open_file.clone(),
+        show_sidebar.into_writable(),
     );
 
     let terminal = terminal_panel(terminal_handle.into_writable(), current_dir.into_writable());
@@ -622,6 +560,8 @@ fn app() -> impl IntoElement {
         theme.into_writable(),
         show_settings.into_writable(),
         companion_mode.into_writable(),
+        show_sidebar.into_writable(),
+        show_dashboard.into_writable(),
         available_models.into_writable(),
         models_loading.into_writable(),
         settings_endpoint_input.into(),
@@ -632,8 +572,15 @@ fn app() -> impl IntoElement {
         c.clone(),
     );
 
-    let main_workspace =
-        main_workspace_layout(file_tree, center_top_panel, terminal, chat, *companion_mode.read());
+    let main_workspace = main_workspace_layout(
+        file_tree,
+        center_top_panel,
+        terminal,
+        chat,
+        *companion_mode.read(),
+        *show_sidebar.read(),
+        *show_dashboard.read(),
+    );
 
     let mut root = rect()
         .expanded()

@@ -188,11 +188,8 @@ where
     // Leave plenty of room for the agent to list directories, search files, and read
     // existing code whether modifying or adding new components (e.g. creating a controller).
     let editing = intent.modification_intent || intent.audit_intent;
-    let max_read_turns: usize = if editing { 10 } else { 6 };
-    let max_read_calls_per_turn: usize = if editing { 12 } else { 6 };
-    let max_total_read_calls: usize = if intent.audit_intent { 30 } else if editing { 25 } else { 15 };
     // A feature may need many read/edit/verify cycles: keep a generous budget.
-    let max_agent_iterations: usize = if editing { 30 } else { 25 };
+    let max_agent_iterations: usize = if editing { 25 } else { 15 };
 
     for iteration in 0..max_agent_iterations {
         // La dernière itération sert uniquement à conclure proprement.
@@ -201,9 +198,35 @@ where
         // doit finir une fonctionnalité ne doit pas être amputé en plein travail.
         let allow_tools = has_tools;
 
-        // Dès que le budget de lecture (1 tour max) est atteint,
-        // on retire TOUS les outils d'exploration (`read_file`, `list_directory`, `search_files`, `run_command`)
-        // pour forcer le modèle à passer immédiatement à `write_file` / `edit_file` / `ask_spec_questions`.
+        // Évalue la saturation réelle de la fenêtre de contexte (sur 64k tokens max).
+        let current_chars: usize = messages.iter().map(|m| {
+            m.content.as_deref().map(|s| s.len()).unwrap_or(0)
+                + m.tool_calls.as_ref().map(|tc| tc.iter().map(|c| c.function.arguments.len()).sum()).unwrap_or(0)
+        }).sum();
+        let est_context_tokens = current_chars / 4;
+
+        // Le budget de lecture s'adapte dynamiquement à la mémoire réellement disponible :
+        // Tant que le contexte est optimal (< 35k tokens, soit < 55%), l'agent dispose d'une marge
+        // confortable pour inspecter tous les fichiers nécessaires au refactoring (imports, composants).
+        let (max_read_turns, max_read_calls_per_turn, max_total_read_calls) = if est_context_tokens < 35_000 {
+            if intent.audit_intent {
+                (6usize, 10usize, 30usize)
+            } else if intent.applying_previous_plan {
+                (4usize, 8usize, 20usize)
+            } else {
+                (4usize, 8usize, 25usize)
+            }
+        } else if est_context_tokens < 48_000 {
+            // Contexte modéré (55-75%) : resserrement pour préserver la mémoire
+            (2usize, 4usize, 12usize)
+        } else {
+            // Contexte critique (> 75%) : restriction stricte pour éviter la troncature
+            (1usize, 2usize, 4usize)
+        };
+
+        // Dès que le budget d'exploration est atteint,
+        // on retire les outils d'exploration (`read_file`, `list_directory`, `search_files`, `run_command`)
+        // pour forcer le modèle à passer immédiatement à l'écriture (`write_file` / `edit_file`).
         let active_tools = policy::active_tools_for_iteration(
             &tools_payload,
             allow_tools,
@@ -368,12 +391,22 @@ where
         let mut buffer = String::new();
         let mut byte_buffer: Vec<u8> = Vec::new();
         let mut acc = DeltaAccumulator::new();
+        let mut last_progress = std::time::Instant::now();
 
         'stream_loop: loop {
             if is_cancel_requested() {
                 accumulated_content.push_str(acc.clean_content());
                 return Ok(cancelled_summary(&accumulated_content));
             }
+
+            // Détection de flux inactif (proxy keep-alive sans tokens ou blocage distant > 25s)
+            if last_progress.elapsed() > Duration::from_secs(25) {
+                if !accumulated_content.trim().is_empty() || acc.has_tool_calls() {
+                    break 'stream_loop;
+                }
+                return Err("Délai d'attente dépassé : l'API Albert ne répond plus (timeout 25s).".to_string());
+            }
+
             let next = tokio::select! {
                 _ = async {
                     loop {
@@ -386,7 +419,7 @@ where
                     accumulated_content.push_str(acc.clean_content());
                     return Ok(cancelled_summary(&accumulated_content));
                 }
-                chunk = tokio::time::timeout(Duration::from_secs(30), stream.next()) => {
+                chunk = tokio::time::timeout(Duration::from_secs(20), stream.next()) => {
                     match chunk {
                         Ok(n) => n,
                         Err(_) => {
@@ -394,7 +427,7 @@ where
                                 break 'stream_loop;
                             }
                             return Err(
-                                "Le modèle n'a rien renvoyé depuis 30 s (timeout du flux).".to_string()
+                                "Le modèle n'a rien renvoyé depuis 20 s (timeout du flux).".to_string()
                             );
                         }
                     }
@@ -432,16 +465,29 @@ where
                 let line = buffer[..pos].trim().to_string();
                 buffer = buffer[pos + 1..].to_string();
 
-                if let Some(rest) = line.strip_prefix("data: ") {
-                    let data = rest.trim();
+                let data_opt = if let Some(rest) = line.strip_prefix("data:") {
+                    Some(rest.trim())
+                } else {
+                    None
+                };
+
+                if let Some(data) = data_opt {
                     if data == "[DONE]" {
                         break 'stream_loop;
                     }
                     match acc.process_data(data) {
                         Ok(pieces) => {
+                            if !pieces.is_empty() {
+                                last_progress = std::time::Instant::now();
+                            }
                             for piece in pieces {
                                 accumulated_content.push_str(&piece);
                                 on_chunk(&piece);
+                            }
+                            // Si le modèle signale une raison de fin (stop, tool_calls, length),
+                            // la complétion de ce tour est terminée ! On quitte immédiatement la boucle réseau.
+                            if acc.finish_reason().is_some() {
+                                break 'stream_loop;
                             }
                         }
                         Err(err_msg) => {
@@ -548,6 +594,9 @@ where
                         tool_call_id: Some(call.id.clone()),
                         name: Some(call.function.name.clone()),
                     });
+                    let skip_notice = format!("\n\n⚙️ `{}` ⏭️ — budget d'exploration atteint (passage direct à l'action)\n\n", call.function.name);
+                    accumulated_content.push_str(&skip_notice);
+                    on_chunk(&skip_notice);
                     continue;
                 }
 

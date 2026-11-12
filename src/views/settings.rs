@@ -68,6 +68,8 @@ where
                 .corner_radius(6.)
                 .horizontal()
                 .cross_align(Alignment::Center)
+                .on_pointer_enter(|_| Cursor::set(CursorIcon::Pointer))
+                .on_pointer_leave(|_| Cursor::set(CursorIcon::default()))
                 .on_press(move |_| {
                     *model_input_press.write() = m_selected.clone();
                 })
