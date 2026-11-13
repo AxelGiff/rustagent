@@ -29,6 +29,7 @@ pub fn normalize_osc7_path(raw: std::path::PathBuf) -> std::path::PathBuf {
     if cfg!(windows) {
         // Convertir un chemin MSYS2 de type `/c/Users/...` ou `c/Users/...` en `C:/Users/...`
         let bytes = trimmed.as_bytes();
+        // Format `/c/Users/...` (slashes initiaux, lettre de lecteur à l'index 1)
         if bytes.len() >= 3
             && bytes[0] == b'/'
             && bytes[1].is_ascii_alphabetic()
@@ -37,10 +38,10 @@ pub fn normalize_osc7_path(raw: std::path::PathBuf) -> std::path::PathBuf {
             let drive = (bytes[1] as char).to_ascii_uppercase();
             return std::path::PathBuf::from(format!("{}:{}", drive, &trimmed[2..]));
         }
+        // Format `c/Users/...` (sans slash initial, lettre de lecteur à l'index 0)
         if bytes.len() >= 2
-            && bytes[0] == b'/'
-            && bytes[1].is_ascii_alphabetic()
-            && bytes[2] == b'/'
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b'/'
         {
             let drive = (bytes[0] as char).to_ascii_uppercase();
             return std::path::PathBuf::from(format!("{}:{}", drive, &trimmed[1..]));

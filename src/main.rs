@@ -42,6 +42,15 @@ fn main() {
     );
 }
 
+enum AgentUiEvent {
+    Chunk { ai_idx: usize, text: String },
+    Diff(diff::PendingDiff),
+    Done {
+        ai_idx: usize,
+        result: Result<(String, Vec<diff::PendingDiff>), String>,
+    },
+}
+
 fn app() -> impl IntoElement {
     let current_theme = use_state(|| theme::ThemePreset::ObsidianDark);
     let theme = use_provide_theme(theme::load_theme);
@@ -288,13 +297,84 @@ fn app() -> impl IntoElement {
         }
     };
 
+    let agent_tx = use_hook(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentUiEvent>();
+        let (mut messages_ev, mut pending_diffs_ev, mut center_view_ev, mut is_generating_ev, mut chat_scroll_ev, user_scrolled_ev, mut current_dir_ev, mut expanded_dirs_ev) =
+            (messages, pending_diffs, center_view_mode, is_generating, chat_scroll, user_scrolled_up, current_dir, expanded_dirs);
+        let terminal_for_sync = terminal_handle.read().clone();
+        let mut chunk_cnt = 0usize;
+        spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                match ev {
+                    AgentUiEvent::Chunk { ai_idx, text } => {
+                        if let Some(msg) = messages_ev.write().get_mut(ai_idx) {
+                            msg.content.push_str(&text);
+                        }
+                        chunk_cnt += 1;
+                        if (chunk_cnt % 5 == 0 || text.contains('\n')) && !*user_scrolled_ev.read() {
+                            chat_scroll_ev.scroll_to(ScrollPosition::End, Direction::Vertical);
+                        }
+                    }
+                    AgentUiEvent::Diff(diff) => {
+                        let diff_path = std::path::PathBuf::from(&diff.path);
+                        let cur_root = current_dir_ev.peek().clone();
+                        if !diff_path.starts_with(&cur_root)
+                            && let Some(new_root) = tools::infer_project_root_from_path(&diff_path)
+                            && new_root != cur_root
+                        {
+                            expanded_dirs_ev.write().clear();
+                            *current_dir_ev.write() = new_root.clone();
+                            if let Some(ref term) = terminal_for_sync {
+                                let cmd = platform::cd_command(&new_root);
+                                let _ = term.write(cmd.as_bytes());
+                            }
+                        }
+                        diff::upsert_diff(&mut pending_diffs_ev.write(), diff);
+                        *center_view_ev.write() = CenterViewMode::Diff;
+                        chat_scroll_ev.scroll_to(ScrollPosition::End, Direction::Vertical);
+                    }
+                    AgentUiEvent::Done { ai_idx, result } => {
+                        *is_generating_ev.write() = false;
+                        match result {
+                            Ok((final_response, new_diffs)) => {
+                                if !new_diffs.is_empty() {
+                                    for d in new_diffs {
+                                        diff::upsert_diff(&mut pending_diffs_ev.write(), d);
+                                    }
+                                    *center_view_ev.write() = CenterViewMode::Diff;
+                                }
+                                if let Some(msg) = messages_ev.write().get_mut(ai_idx) {
+                                    msg.content = final_response;
+                                }
+                            }
+                            Err(friendly) => {
+                                if let Some(msg) = messages_ev.write().get_mut(ai_idx) {
+                                    if msg.content.trim().is_empty() {
+                                        msg.content = format!("⚠️ **Erreur lors de l'appel :**\n\n{}", friendly);
+                                    } else {
+                                        msg.content.push_str(&format!("\n\n⚠️ **Erreur lors de l'appel :**\n\n{}", friendly));
+                                    }
+                                }
+                            }
+                        }
+                        if !*user_scrolled_ev.read() {
+                            chat_scroll_ev.scroll_to(ScrollPosition::End, Direction::Vertical);
+                        }
+                    }
+                }
+            }
+        });
+        tx
+    });
+
     let send_text = {
         let (messages, input_value, editor, file_name, is_generating, chat_scroll, context_paths, user_scrolled_up) =
             (messages, input_value, editor, file_name, is_generating, chat_scroll, context_paths, user_scrolled_up);
+        let agent_tx = agent_tx.clone();
         move |user_message: String| {
             let (mut messages, mut input_value, mut editor, mut file_name, mut is_generating, mut chat_scroll, mut context_paths, mut user_scrolled_up) =
                 (messages, input_value, editor, file_name, is_generating, chat_scroll, context_paths, user_scrolled_up);
-            if !should_send_message(&user_message) {
+            if *is_generating.read() || !should_send_message(&user_message) {
                 return;
             }
 
@@ -376,28 +456,22 @@ fn app() -> impl IntoElement {
                 }
             }
 
-            let (mut pending_diffs_stream, mut center_view_mode_stream, mut messages_stream, mut is_generating_stream, mut chat_scroll_stream, mut user_scrolled_stream) =
-                (pending_diffs, center_view_mode, messages, is_generating, chat_scroll, user_scrolled_up);
             let spec_mode = *is_spec_mode.read();
+            let pending_diffs_snapshot = pending_diffs.read().clone();
 
-            spawn(async move {
-                messages_stream.write().push(Message {
-                    role: Role::AI,
-                    content: String::new(),
-                });
-                *user_scrolled_stream.write() = false;
-                chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
-                let ai_msg_idx = messages_stream.read().len() - 1;
+            messages.write().push(Message {
+                role: Role::AI,
+                content: String::new(),
+            });
+            *user_scrolled_up.write() = false;
+            chat_scroll.scroll_to(ScrollPosition::End, Direction::Vertical);
+            let ai_msg_idx = messages.read().len() - 1;
 
-                let (mut messages_for_chunk, mut pending_diffs_for_cb, mut center_view_for_cb, mut chat_scroll_for_cb, mut chat_scroll_for_chunk, user_scrolled_for_chunk, mut chunk_cnt) =
-                    (messages_stream, pending_diffs_stream, center_view_mode_stream, chat_scroll_stream, chat_scroll_stream, user_scrolled_stream, 0usize);
-
-                // Snapshot AVANT l'appel asynchrone : sinon le guard de lecture de
-                // `pending_diffs_stream` reste vivant pendant tout le `.await` et le
-                // callback `on_pending_diff` panique ("State already borrowed").
-                let pending_diffs_snapshot = pending_diffs_stream.read().clone();
-
+            let tx = agent_tx.clone();
+            tokio::spawn(async move {
                 crate::session::set_active_project_root(Some(root_snapshot.clone()));
+                let tx_chunk = tx.clone();
+                let tx_diff = tx.clone();
                 let result = agent::run_agent_turn(
                     user_message,
                     spec_mode,
@@ -409,67 +483,22 @@ fn app() -> impl IntoElement {
                     pending_diffs_snapshot,
                     wants_code,
                     detected_language,
-                    |chunk| {
-                        if let Some(msg) = messages_for_chunk.write().get_mut(ai_msg_idx) {
-                            msg.content.push_str(chunk);
-                        }
-                        chunk_cnt += 1;
-                        if (chunk_cnt % 5 == 0 || chunk.contains('\n')) && !*user_scrolled_for_chunk.read() {
-                            chat_scroll_for_chunk.scroll_to(ScrollPosition::End, Direction::Vertical);
-                        }
+                    move |chunk| {
+                        let _ = tx_chunk.send(AgentUiEvent::Chunk {
+                            ai_idx: ai_msg_idx,
+                            text: chunk.to_string(),
+                        });
                     },
-                    |diff| {
-                        let diff_path = std::path::PathBuf::from(&diff.path);
-                        let cur_root = current_dir_stream.peek().clone();
-                        if !diff_path.starts_with(&cur_root)
-                            && let Some(new_root) = tools::infer_project_root_from_path(&diff_path)
-                            && new_root != cur_root
-                        {
-                            expanded_dirs_stream.write().clear();
-                            *current_dir_stream.write() = new_root.clone();
-                            if let Some(ref term) = terminal_for_sync {
-                                let cmd = platform::cd_command(&new_root);
-                                let _ = term.write(cmd.as_bytes());
-                            }
-                        }
-                        diff::upsert_diff(&mut pending_diffs_for_cb.write(), diff);
-                        *center_view_for_cb.write() = CenterViewMode::Diff;
-                        chat_scroll_for_cb.scroll_to(ScrollPosition::End, Direction::Vertical);
+                    move |diff| {
+                        let _ = tx_diff.send(AgentUiEvent::Diff(diff));
                     },
                 )
                 .await;
 
-                *is_generating_stream.write() = false;
-
-                match result {
-                    Ok((final_response, new_diffs)) => {
-                        if !new_diffs.is_empty() {
-                            for d in new_diffs {
-                                diff::upsert_diff(&mut pending_diffs_stream.write(), d);
-                            }
-                            *center_view_mode_stream.write() = CenterViewMode::Diff;
-                        }
-                        if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
-                            msg.content = final_response;
-                        }
-                    }
-                    Err(friendly) => {
-                        if let Some(msg) = messages_stream.write().get_mut(ai_msg_idx) {
-                            if msg.content.trim().is_empty() {
-                                msg.content =
-                                    format!("⚠️ **Erreur lors de l'appel :**\n\n{}", friendly);
-                            } else {
-                                msg.content.push_str(&format!(
-                                    "\n\n⚠️ **Erreur lors de l'appel :**\n\n{}",
-                                    friendly
-                                ));
-                            }
-                        }
-                    }
-                }
-                if !*user_scrolled_stream.read() {
-                    chat_scroll_stream.scroll_to(ScrollPosition::End, Direction::Vertical);
-                }
+                let _ = tx.send(AgentUiEvent::Done {
+                    ai_idx: ai_msg_idx,
+                    result,
+                });
             });
         }
     };
